@@ -16,28 +16,28 @@ library(shinythemes)
 
 
 # Define UI
-ui <- fluidPage(theme = shinytheme("cerulean"),
+ui <- fluidPage(theme = shinytheme("darkly"),
                 navbarPage(
-                  # theme = "cerulean",  # <--- To use a theme, uncomment this
+                  #theme = "cerulean",  # <--- To use a theme, uncomment this
                   "My first app",
-                  tabPanel("Navbar 1",
+                  tabPanel("Name",
                            sidebarPanel(
-                             tags$h3("Input:"),
-                             textInput("txt1", "Given Name:", ""),
-                             textInput("txt2", "Surname:", ""),
+                             tags$h2("Input:"),
+                             textInput("txt1", "First Name:", ""),
+                             textInput("txt2", "Last Name:", ""),
                              
                            ), # sidebarPanel
                            mainPanel(
-                             h1("Header 1"),
+                             h1("Name"),
                              
-                             h4("Output 1"),
+                             h4("Full Name"),
                              verbatimTextOutput("txtout"),
                              
                            ) # mainPanel
                            
-                  ), # Navbar 1, tabPanel
-                  tabPanel("Navbar 2", "This panel is intentionally left blank"),
-                  tabPanel("Navbar 3", "This panel is intentionally left blank")
+                  ), # Name, tabPanel
+                  tabPanel("Navbar 2", "Hi"),
+                  tabPanel("Navbar 3", "Hello")
                   
                 ) # navbarPage
 ) # fluidPage
