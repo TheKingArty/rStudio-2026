@@ -3,13 +3,18 @@
 # Load R packages and datasets
 library(shiny)
 library(shinythemes)
+library(bslib)
+library(DT)
+library(palmerpenguins)
+library(dplyr)
+
 data("airquality")
 
 
 # Define UI
-ui <- fluidPage(theme = shinytheme("darkly"),
+ui <- fluidPage(theme = shinytheme("cerulean"),
                 navbarPage(
-                  #theme = "cerulean",  # <--- To use a theme, uncomment this
+                  #theme = "cerulean"
                   "My first app",
                   tabPanel("Navbar 1",
                            sidebarPanel(
@@ -51,7 +56,9 @@ ui <- fluidPage(theme = shinytheme("darkly"),
                              )
                            )
                            ),
-                  tabPanel("Navbar 3", "Hello")
+                  tabPanel("Navbar 3", 
+                           dataTableOutput("table"),
+                           "Hello")
                   
                 ) # navbarPage
 ) # fluidPage
@@ -73,6 +80,7 @@ server <- function(input, output) {
          xlab = "Ozone level",
          main = "Histogram of Ozone level")
   })
+  output$table <- renderDataTable({datatable(airquality)})
 } # server
 
 
