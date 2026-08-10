@@ -7,6 +7,9 @@ set.seed(12345)
 HapMap.subset <- subset(HapMap, CHR %in% 4:7)
 # for highlighting SNPs of interest
 significantSNP <- sample(HapMap.subset$SNP, 20)
+
+df <- subset(HapMap, CHR %in% 1:3)
+
 head(HapMap.subset)
 
 dim(HapMap.subset)

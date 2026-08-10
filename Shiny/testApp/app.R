@@ -1,12 +1,13 @@
 # With help from tutorial by Data Professor
 
 # Load R packages and datasets
-library(shiny)
-library(shinythemes)
-library(bslib)
-library(DT)
-library(palmerpenguins)
-library(dplyr)
+library(shiny) # shiny
+library(shinythemes) # themes
+library(DT) # datatables
+
+#library(bslib) #xtra
+#library(palmerpenguins) #xtra
+#library(dplyr) #xtra
 
 data("airquality")
 
