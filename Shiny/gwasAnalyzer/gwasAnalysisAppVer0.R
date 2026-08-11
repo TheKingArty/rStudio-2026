@@ -13,15 +13,12 @@ library(plotly)
 
 data("airquality")
 
-if (!exists("bmixdrinking")){
-  bmixdrinking <- read.csv("C:/Users/arthu/Documents/Research/localGWASdata/GCST90681941.h.tsv/GCST90681941.h.tsv", sep = "\t")
-}
-if (!exists("bchr1")){
+bmixdrinking <- read.csv("C:/Users/arthu/Documents/Research/localGWASdata/GCST90681941.h.tsv/GCST90681941.h.tsv", sep = "\t")
+
 bchr1 <- subset(bmixdrinking, chromosome %in% 1)
-}
-if (!exists("bchr1ovrp5")){
-  bchr1ovrp5 <- subset(bchr1, p_value < 1e-5)
-}
+
+bchr1ovrp5 <- subset(bchr1, p_value < 1e-5)
+
 
 # Define UI
 ui <- fluidPage(theme = shinytheme("cerulean"),
@@ -77,7 +74,7 @@ server <- function(input, output) {
       snp = "rsid"
     )
   })
-  output$table <- renderDataTable({datatable(bchr1)})
+  output$table <- renderDataTable({datatable(bchr1ovrp5)})
 } # server
 
 
