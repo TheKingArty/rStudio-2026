@@ -4,6 +4,8 @@
 library(shiny) # shiny
 library(shinythemes) # themes
 library(DT) # datatables
+library(manhattanly)
+library(plotly)
 
 #library(bslib) #xtra
 #library(palmerpenguins) #xtra
@@ -11,6 +13,15 @@ library(DT) # datatables
 
 data("airquality")
 
+if (!exists("bmixdrinking")){
+  bmixdrinking <- read.csv("C:/Users/arthu/Documents/Research/localGWASdata/GCST90681941.h.tsv/GCST90681941.h.tsv", sep = "\t")
+}
+if (!exists("bchr1")){
+bchr1 <- subset(bmixdrinking, chromosome %in% 1)
+}
+if (!exists("bchr1ovrp5")){
+  bchr1ovrp5 <- subset(bchr1, p_value < 1e-5)
+}
 
 # Define UI
 ui <- fluidPage(theme = shinytheme("cerulean"),
@@ -34,29 +45,13 @@ ui <- fluidPage(theme = shinytheme("cerulean"),
                            
                   ), # Navbar 1, tabPanel
                   tabPanel("Navbar 2",
-                           sidebarLayout(
-                             
-                             # Sidebar panel for inputs
-                             sidebarPanel(
-                               
-                               # Input: Slider for the number of bins
-                               sliderInput(inputId = "bins",
-                                           label = "Number of bins:",
-                                           min = 1,
-                                           max = 50,
-                                           value = 30)
-                               
-                             ),
-                             
-                             # Main panel for displaying outputs
-                             mainPanel(
-                               
-                               # Output: Histogram ----
-                               plotOutput(outputId = "distPlot")
-                               
-                             )
+                           titlePanel("Interactive GWAS Manhattan Plot"),
+                           
+                           mainPanel(
+                             # Use plotlyOutput to handle the htmlwidget
+                             plotlyOutput("manhattanPlot", height = "600px")
                            )
-                           ),
+                  ),
                   tabPanel("Navbar 3", 
                            dataTableOutput("table"),
                            "Hello")
@@ -72,17 +67,17 @@ server <- function(input, output) {
   output$txtout <- renderText({
     paste( input$txt1, input$txt2, sep = " " )
   })
-  output$distPlot <- renderPlot({
-    
-    x    <- airquality$Ozone
-    x    <- na.omit(x)
-    bins <- seq(min(x), max(x), length.out = input$bins + 1)
-    
-    hist(x, breaks = bins, col = "#75AADB", border = "black",
-         xlab = "Ozone level",
-         main = "Histogram of Ozone level")
+  output$manhattanPlot <- renderPlotly({
+    # Use renderPlotly to wrap the manhattanly function call
+    manhattanly(
+      bchr1ovrp5,          # Swap with your actual dataset variable
+      chr = "chromosome",
+      bp = "base_pair_location",
+      p = "p_value",
+      snp = "rsid"
+    )
   })
-  output$table <- renderDataTable({datatable(airquality)})
+  output$table <- renderDataTable({datatable(bchr1)})
 } # server
 
 
