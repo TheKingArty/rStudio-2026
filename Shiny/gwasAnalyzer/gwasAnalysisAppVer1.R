@@ -240,25 +240,54 @@ server <- function(input, output, session) {
   
   output$manhattanPlot1 <- renderPlotly({
     req(inp1(), input$sys1_chr_col, input$sys1_bp_col, input$sys1_p_col, input$sys1_snp_col)
-    manhattanly(
+    p1 <- manhattanly(
       inp1(),
       chr = input$sys1_chr_col,
       bp = input$sys1_bp_col,
       p = input$sys1_p_col,
       snp = input$sys1_snp_col
     )
+    # Assign a source ID to trace zoom/pan events
+    p1$x$source <- "manhattanPlot1"
+    p1
   })
   
   output$manhattanPlot2 <- renderPlotly({
     req(inp2(), input$sys2_chr_col, input$sys2_bp_col, input$sys2_p_col, input$sys2_snp_col)
-    manhattanly(
+    p2 <- manhattanly(
       inp2(),
       chr = input$sys2_chr_col,
       bp = input$sys2_bp_col,
       p = input$sys2_p_col,
       snp = input$sys2_snp_col
     )
+    # Assign a source ID to trace zoom/pan events
+    p2$x$source <- "manhattanPlot2"
+    p2
   })
+  
+  # --- SYNC ZOOM/PAN BETWEEN PLOTS ---
+  
+  # 1. Listen for Zoom/Pan on Plot 1 and update Plot 2
+  observeEvent(event_data("plotly_relayout", source = "manhattanPlot1"), {
+    relayout_data <- event_data("plotly_relayout", source = "manhattanPlot1")
+    
+    # Check if x-axis or y-axis bounds were modified
+    if (!is.null(relayout_data)) {
+      plotlyProxy("manhattanPlot2", session) %>%
+        plotlyProxyInvoke("relayout", relayout_data)
+    }
+  }, ignoreInit = TRUE)
+  
+  # 2. Listen for Zoom/Pan on Plot 2 and update Plot 1
+  observeEvent(event_data("plotly_relayout", source = "manhattanPlot2"), {
+    relayout_data <- event_data("plotly_relayout", source = "manhattanPlot2")
+    
+    if (!is.null(relayout_data)) {
+      plotlyProxy("manhattanPlot1", session) %>%
+        plotlyProxyInvoke("relayout", relayout_data)
+    }
+  }, ignoreInit = TRUE)
   
   output$table1 <- renderDataTable({
     req(inp1())
