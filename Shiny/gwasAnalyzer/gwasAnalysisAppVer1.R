@@ -13,6 +13,36 @@ library(colourpicker) # color input
 
 options(shiny.maxRequestSize = 1000 * 1024^2)
 
+# Helper function to parse inputs like "1, 3, 5-7"
+parse_chr_input <- function(input_str) {
+  if (!nzchar(trimws(input_str))) return(NULL)
+  
+  parts <- unlist(strsplit(input_str, ","))
+  parts <- trimws(parts)
+  parts <- parts[parts != ""]
+  
+  parsed_chrs <- c()
+  
+  for (part in parts) {
+    if (grepl("-", part)) {
+      range_bounds <- unlist(strsplit(part, "-"))
+      range_bounds <- trimws(range_bounds)
+      num_start <- as.numeric(range_bounds[1])
+      num_end <- as.numeric(range_bounds[2])
+      
+      if (!is.na(num_start) && !is.na(num_end)) {
+        parsed_chrs <- c(parsed_chrs, as.character(seq(num_start, num_end)))
+      } else {
+        parsed_chrs <- c(parsed_chrs, part)
+      }
+    } else {
+      parsed_chrs <- c(parsed_chrs, part)
+    }
+  }
+  
+  return(unique(parsed_chrs))
+}
+
 # Define UI
 ui <- fluidPage(theme = shinytheme("cerulean"),
                 navbarPage(
@@ -156,9 +186,10 @@ server <- function(input, output, session) {
     chr_col <- input$sys1_chr_col
     p_col <- input$sys1_p_col
     
-    # Filter Chromosome if user typed something in
-    if (nzchar(input$sys1_chr_filter)) {
-      df <- df[get(chr_col) %in% input$sys1_chr_filter]
+    # Filter Chromosome(s)
+    target_chrs <- parse_chr_input(input$sys1_chr_filter)
+    if (!is.null(target_chrs)) {
+      df <- df[as.character(get(chr_col)) %in% target_chrs]
     }
     
     # Filter P-Value
@@ -200,9 +231,10 @@ server <- function(input, output, session) {
     chr_col <- input$sys2_chr_col
     p_col <- input$sys2_p_col
     
-    # Filter Chromosome if user typed something in
-    if (nzchar(input$sys2_chr_filter)) {
-      df <- df[get(chr_col) %in% input$sys2_chr_filter]
+    # Filter Chromosome(s)
+    target_chrs <- parse_chr_input(input$sys2_chr_filter)
+    if (!is.null(target_chrs)) {
+      df <- df[as.character(get(chr_col)) %in% target_chrs]
     }
     
     # Filter P-Value
