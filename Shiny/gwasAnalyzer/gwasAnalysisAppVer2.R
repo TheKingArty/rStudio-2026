@@ -128,7 +128,26 @@ ui <- fluidPage(
              ),
              
              # Dynamic container handles both side-by-side and overlay modes
-             uiOutput("plot_container")
+             uiOutput("plot_container"),
+             
+             hr(),
+             
+             # gnomAD Link Panel
+             fluidRow(
+               column(12,
+                      wellPanel(
+                        h4("gnomAD Gene & Variant Direct Link"),
+                        fluidRow(
+                          column(4, textInput("gnomad_query", "Enter Gene Symbol, RSID, or Locus (e.g., PCSK9 or rs1234)", value = "")),
+                          column(3, selectInput("gnomad_build", "Genome Build", choices = c("GRCh38" = "gnomad_r4", "GRCh37" = "gnomad_r2_1"))),
+                          column(5, 
+                                 br(),
+                                 uiOutput("gnomad_link_button")
+                          )
+                        )
+                      )
+               )
+             )
     ),
     
     tabPanel("Navbar 3", 
@@ -276,34 +295,22 @@ server <- function(input, output, session) {
     req(inp1(), inp2(), input$sys1_chr_col, input$sys1_bp_col, input$sys1_p_col, input$sys1_snp_col)
     req(input$sys2_chr_col, input$sys2_bp_col, input$sys2_p_col, input$sys2_snp_col)
     
-    # Copy datasets and create uniform column names for plotting
     d1 <- copy(inp1())
-    d1_chr <- input$sys1_chr_col
-    d1_bp  <- input$sys1_bp_col
-    d1_p   <- input$sys1_p_col
-    d1_snp <- input$sys1_snp_col
-    
     d1[, `:=`(
-      CHR_plot = as.character(get(d1_chr)),
-      BP_plot  = as.numeric(get(d1_bp)),
-      P_plot   = -log10(as.numeric(get(d1_p))),
-      SNP_plot = as.character(get(d1_snp))
+      CHR_plot = as.character(get(input$sys1_chr_col)),
+      BP_plot  = as.numeric(get(input$sys1_bp_col)),
+      P_plot   = -log10(as.numeric(get(input$sys1_p_col))),
+      SNP_plot = as.character(get(input$sys1_snp_col))
     )]
     
     d2 <- copy(inp2())
-    d2_chr <- input$sys2_chr_col
-    d2_bp  <- input$sys2_bp_col
-    d2_p   <- input$sys2_p_col
-    d2_snp <- input$sys2_snp_col
-    
     d2[, `:=`(
-      CHR_plot = as.character(get(d2_chr)),
-      BP_plot  = as.numeric(get(d2_bp)),
-      P_plot   = -log10(as.numeric(get(d2_p))),
-      SNP_plot = as.character(get(d2_snp))
+      CHR_plot = as.character(get(input$sys2_chr_col)),
+      BP_plot  = as.numeric(get(input$sys2_bp_col)),
+      P_plot   = -log10(as.numeric(get(input$sys2_p_col))),
+      SNP_plot = as.character(get(input$sys2_snp_col))
     )]
     
-    # Construct overlay plot with separate traces for each system
     plot_ly() %>%
       add_trace(
         data = d1,
@@ -333,6 +340,23 @@ server <- function(input, output, session) {
         yaxis = list(title = "-log10(p-value)"),
         legend = list(title = list(text = '<b>Dataset</b>'))
       )
+  })
+  
+  # --- GNOMAD LINK GENERATOR LOGIC ---
+  output$gnomad_link_button <- renderUI({
+    req(input$gnomad_query)
+    query_trimmed <- trimws(input$gnomad_query)
+    if (query_trimmed == "") return(NULL)
+    
+    target_url <- paste0("https://gnomad.broadinstitute.org/search?dataset=", input$gnomad_build, "&q=", URLencode(query_trimmed))
+    
+    tags$a(
+      href = target_url,
+      target = "_blank",
+      class = "btn btn-primary",
+      icon("external-link-alt"),
+      paste("Open", query_trimmed, "in gnomAD")
+    )
   })
   
   # --- SYNC ZOOM/PAN BETWEEN PLOTS ---
