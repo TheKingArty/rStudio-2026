@@ -1,5 +1,3 @@
-# With help from tutorial by Data Professor
-
 # Load R packages and datasets
 library(shiny) # shiny
 library(shinythemes) # themes
@@ -40,6 +38,38 @@ parse_chr_input <- function(input_str) {
   }
   
   return(unique(parsed_chrs))
+}
+
+#gnomad url helper
+
+build_gnomad_url <- function(query, dataset) {
+  q <- trimws(query)
+  if (!nzchar(q)) return(NULL)
+  
+  # Strip "chr" prefix if present
+  q_clean <- gsub("^chr", "", q, ignore.case = TRUE)
+  
+  # 1. Ensembl Gene ID (e.g., ENSG00000012048)
+  if (grepl("^ENSG[0-9]+$", q, ignore.case = TRUE)) {
+    return(paste0("https://gnomad.broadinstitute.org/gene/", toupper(q), "?dataset=", dataset))
+  }
+  
+  # 2. Variant ID (e.g., 1-55516888-G-GA, 1:55516888:G:GA)
+  var_match <- regmatches(q_clean, regexec("^([0-9]{1,2}|X|Y|MT|M)[-:_]([0-9]+)[-:_]([A-Za-z]+)[-:_]([A-Za-z]+)$", q_clean, ignore.case = TRUE))[[1]]
+  if (length(var_match) == 5) {
+    formatted_var <- paste(toupper(var_match[2]), var_match[3], toupper(var_match[4]), toupper(var_match[5]), sep = "-")
+    return(paste0("https://gnomad.broadinstitute.org/variant/", formatted_var, "?dataset=", dataset))
+  }
+  
+  # 3. Genomic Region / Locus (e.g., 1:55516888-55520000)
+  reg_match <- regmatches(q_clean, regexec("^([0-9]{1,2}|X|Y|MT|M)[-:_]([0-9]+)[-:_]([0-9]+)$", q_clean, ignore.case = TRUE))[[1]]
+  if (length(reg_match) == 4) {
+    formatted_reg <- paste(toupper(reg_match[2]), reg_match[3], reg_match[4], sep = "-")
+    return(paste0("https://gnomad.broadinstitute.org/region/", formatted_reg, "?dataset=", dataset))
+  }
+  
+  # 4. Universal Search Endpoint (Gene Symbols like PCSK9, rsIDs like rs1234)
+  return(paste0("https://gnomad.broadinstitute.org/search?dataset=", dataset, "&q=", URLencode(q, reserved = TRUE)))
 }
 
 # Define UI
@@ -132,11 +162,11 @@ ui <- fluidPage(
              
              hr(),
              
-             # gnomAD Link Panel
+             # gnomAD Link Panel inside UI
              fluidRow(
                column(12,
                       wellPanel(
-                        h4("gnomAD Gene & Variant Direct Link"),
+                        h4("gnoMAD Gene & Variant Direct Link"),
                         fluidRow(
                           column(4, textInput("gnomad_query", "Enter Gene Symbol, RSID, or Locus (e.g., PCSK9 or rs1234)", value = "")),
                           column(3, selectInput("gnomad_build", "Genome Build", choices = c("GRCh38" = "gnomad_r4", "GRCh37" = "gnomad_r2_1"))),
@@ -346,16 +376,17 @@ server <- function(input, output, session) {
   output$gnomad_link_button <- renderUI({
     req(input$gnomad_query)
     query_trimmed <- trimws(input$gnomad_query)
-    if (query_trimmed == "") return(NULL)
+    if (!nzchar(query_trimmed)) return(NULL)
     
-    target_url <- paste0("https://gnomad.broadinstitute.org/search?dataset=", input$gnomad_build, "&q=", URLencode(query_trimmed))
+    target_url <- build_gnomad_url(query_trimmed, input$gnomad_build)
+    if (is.null(target_url)) return(NULL)
     
     tags$a(
       href = target_url,
       target = "_blank",
       class = "btn btn-primary",
       icon("external-link-alt"),
-      paste("Open", query_trimmed, "in gnomAD")
+      paste("Open", query_trimmed, "in gnoMAD")
     )
   })
   
