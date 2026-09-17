@@ -298,6 +298,8 @@ server <- function(input, output, session) {
       bp = input$sys1_bp_col,
       p = input$sys1_p_col,
       snp = input$sys1_snp_col,
+      annotation1 = input$sys1_snp_col,
+      annotation2 = input$sys1_p_col,
       col = c(input$sys1_col, input$sys1_col)
     )
     p1$x$source <- "manhattanPlot1"
@@ -314,6 +316,8 @@ server <- function(input, output, session) {
       bp = input$sys2_bp_col,
       p = input$sys2_p_col,
       snp = input$sys2_snp_col,
+      annotation1 = input$sys2_snp_col,
+      annotation2 = input$sys2_p_col,
       col = c(input$sys2_col, input$sys2_col)
     )
     p2$x$source <- "manhattanPlot2"
