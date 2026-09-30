@@ -1,4 +1,4 @@
-# Load R packages
+# Load required R packages
 library(shiny)
 library(shinythemes)
 library(DT)
@@ -12,7 +12,7 @@ library(jsonlite)
 # Set max upload size to 1GB
 options(shiny.maxRequestSize = 1000 * 1024^2)
 
-# Helper function to parse inputs like "1, 3, 5-7"
+# Helper function to parse chromosome range inputs like "1, 3, 5-7"
 parse_chr_input <- function(input_str) {
   if (!nzchar(trimws(input_str))) return(NULL)
   
@@ -42,27 +42,26 @@ parse_chr_input <- function(input_str) {
   return(unique(parsed_chrs))
 }
 
-# gnomad url helper
+# gnoMAD URL builder helper
 build_gnomad_url <- function(query, dataset) {
   q <- trimws(query)
   if (!nzchar(q)) return(NULL)
   
-  # Strip "chr" prefix if present
   q_clean <- gsub("^chr", "", q, ignore.case = TRUE)
   
-  # 1. Ensembl Gene ID (e.g., ENSG00000012048)
+  # 1. Ensembl Gene ID
   if (grepl("^ENSG[0-9]+$", q, ignore.case = TRUE)) {
     return(paste0("https://gnomad.broadinstitute.org/gene/", toupper(q), "?dataset=", dataset))
   }
   
-  # 2. Variant ID (e.g., 1-55516888-G-GA, 1:55516888:G:GA)
-  var_match <- regmatches(q_clean, regexec("^([0-9]{1,2}|X|Y|MT|M)[-:_]([0-9]+)[-:_]([A-Za-z]+)[-:_]([A-Za-z]+)$", q_clean, ignore.case = TRUE))[[1]]
+  # 2. Variant ID
+  var_match <- regmatches(q_clean, regexec("^([0-9]{1,2}|X|Y|MT|M)[-:_]([0-9]+)[-:_]([A-Za-z0-9*]+)[-:_]([A-Za-z0-9*]+)$", q_clean, ignore.case = TRUE))[[1]]
   if (length(var_match) == 5) {
     formatted_var <- paste(toupper(var_match[2]), var_match[3], toupper(var_match[4]), toupper(var_match[5]), sep = "-")
     return(paste0("https://gnomad.broadinstitute.org/variant/", formatted_var, "?dataset=", dataset))
   }
   
-  # 3. Genomic Region / Locus (e.g., 1:55516888-55520000)
+  # 3. Genomic Region / Locus
   reg_match <- regmatches(q_clean, regexec("^([0-9]{1,2}|X|Y|MT|M)[-:_]([0-9]+)[-:_]([0-9]+)$", q_clean, ignore.case = TRUE))[[1]]
   if (length(reg_match) == 4) {
     formatted_reg <- paste(toupper(reg_match[2]), reg_match[3], reg_match[4], sep = "-")
@@ -73,99 +72,195 @@ build_gnomad_url <- function(query, dataset) {
   return(paste0("https://gnomad.broadinstitute.org/search?dataset=", dataset, "&q=", URLencode(q, reserved = TRUE)))
 }
 
-# Helper to extract raw Variant ID from hover text/customdata
-clean_variant_id <- function(raw_input) {
-  if (is.null(raw_input) || length(raw_input) == 0) return(NULL)
-  raw_str <- as.character(raw_input[1])
-  
-  if (grepl("SNP:", raw_str)) {
-    match <- regmatches(raw_str, regexec("SNP:\\s*([^<\\s]+)", raw_str))[[1]]
-    if (length(match) >= 2) return(trimws(match[2]))
+# Robust Variant Cleaner with Fallback Support
+clean_variant_id <- function(raw_input, chr_fallback = NULL, bp_fallback = NULL) {
+  if (is.null(raw_input) || length(raw_input) == 0) {
+    if (!is.null(chr_fallback) && !is.null(bp_fallback)) {
+      c_val <- toupper(gsub("^chr", "", as.character(chr_fallback), ignore.case = TRUE))
+      b_val <- as.character(bp_fallback)
+      if (nzchar(c_val) && nzchar(b_val)) return(paste(c_val, b_val, sep = "-"))
+    }
+    return(NULL)
   }
   
-  var_match <- regmatches(raw_str, regexec("([0-9]{1,2}|X|Y|MT|M)[-:_]([0-9]+)[-:_]([A-Za-z]+)[-:_]([A-Za-z]+)", raw_str, ignore.case = TRUE))[[1]]
-  if (length(var_match) >= 1) return(var_match[1])
+  raw_str <- unlist(raw_input)[1]
+  if (is.na(raw_str) || !nzchar(raw_str)) return(NULL)
+  raw_str <- as.character(raw_str)
   
-  return(trimws(raw_str))
+  # Strip HTML tags & newlines
+  clean_str <- gsub("<[^>]+>", " ", raw_str)
+  clean_str <- gsub("[\r\n]", " ", clean_str)
+  
+  # 1. Try matching full 4-part CHROM-POS-REF-ALT
+  m_var <- regmatches(clean_str, regexec("(?:chr)?([0-9]{1,2}|X|Y|MT|M)[-:_]([0-9]+)[-:_]([A-Za-z0-9*<>-]+)[-:_/]([A-Za-z0-9*<>-]+)", clean_str, ignore.case = TRUE))[[1]]
+  if (length(m_var) == 5 && nzchar(m_var[1])) {
+    return(toupper(paste(m_var[2], m_var[3], m_var[4], m_var[5], sep = "-")))
+  }
+  
+  # 2. Try matching rsID
+  m_rs <- regmatches(clean_str, regexpr("rs[0-9]+", clean_str, ignore.case = TRUE))
+  if (length(m_rs) > 0 && nzchar(m_rs[1])) {
+    return(tolower(m_rs[1]))
+  }
+  
+  # 3. Try matching 2-part Position-Only (CHROM-POS)
+  m_pos <- regmatches(clean_str, regexec("(?:chr)?([0-9]{1,2}|X|Y|MT|M)[-:_]([0-9]+)", clean_str, ignore.case = TRUE))[[1]]
+  if (length(m_pos) == 3 && nzchar(m_pos[1])) {
+    return(toupper(paste(m_pos[2], m_pos[3], sep = "-")))
+  }
+  
+  # 4. Try extracting CHR and BP from hover text labels
+  m_chr_label <- regmatches(clean_str, regexec("CHR[:\\s]+(?:chr)?([0-9]{1,2}|X|Y|MT|M)", clean_str, ignore.case = TRUE))[[1]]
+  m_bp_label  <- regmatches(clean_str, regexec("BP[:\\s]+([0-9]+)", clean_str, ignore.case = TRUE))[[1]]
+  
+  if (length(m_chr_label) >= 2 && length(m_bp_label) >= 2) {
+    c_val <- toupper(m_chr_label[2])
+    b_val <- m_bp_label[2]
+    return(paste(c_val, b_val, sep = "-"))
+  }
+  
+  # 5. Fallback to passed chromosome & BP if available
+  if (!is.null(chr_fallback) && !is.null(bp_fallback)) {
+    c_val <- toupper(gsub("^chr", "", as.character(chr_fallback), ignore.case = TRUE))
+    b_val <- as.character(bp_fallback)
+    if (nzchar(c_val) && nzchar(b_val) && !is.na(c_val) && !is.na(b_val)) {
+      return(paste(c_val, b_val, sep = "-"))
+    }
+  }
+  
+  # 6. If simple string with no spaces, return trimmed
+  trimmed <- trimws(clean_str)
+  if (!grepl("\\s", trimmed) && nzchar(trimmed)) {
+    return(toupper(trimmed))
+  }
+  
+  return(NULL)
 }
 
-# Helper to fetch Live Allele Frequency from gnoMAD GraphQL API
+# Robust gnoMAD AF Fetcher with Header & Fallback Fixes
 fetch_gnomad_af <- function(variant_id, dataset = "gnomad_r4") {
   cleaned_id <- clean_variant_id(variant_id)
   if (is.null(cleaned_id) || !nzchar(cleaned_id)) return("N/A")
   
   no_chr_id <- gsub("^chr", "", cleaned_id, ignore.case = TRUE)
-  formatted_id <- gsub("[:_]", "-", no_chr_id)
+  formatted_id <- toupper(gsub("[:_]", "-", no_chr_id))
+  if (startsWith(formatted_id, "RS")) formatted_id <- tolower(formatted_id)
   
-  is_canonical_var <- grepl("^([0-9]{1,2}|X|Y|MT|M)-[0-9]+-[A-Za-z]+-[A-Za-z]+$", formatted_id, ignore.case = TRUE)
-  is_rsid <- grepl("^rs[0-9]+$", formatted_id, ignore.case = TRUE)
+  is_rsid          <- grepl("^rs[0-9]+$", formatted_id, ignore.case = TRUE)
+  is_canonical_var <- grepl("^([0-9]{1,2}|X|Y|MT|M)-[0-9]+-[^-]+-[^-]+$", formatted_id, ignore.case = TRUE)
+  is_pos_only      <- grepl("^([0-9]{1,2}|X|Y|MT|M)-[0-9]+$", formatted_id, ignore.case = TRUE)
   
-  # Construct GraphQL query based on variant format type
+  # Conditionally request joint AF only for v4 dataset
+  af_fields <- if (identical(dataset, "gnomad_r4")) {
+    "genome { af } exome { af } joint { af }"
+  } else {
+    "genome { af } exome { af }"
+  }
+  
   if (is_rsid) {
     query_string <- sprintf('{
       rsid(rsid: "%s") {
         variants(dataset: %s) {
           variant_id
-          genome { af }
-          exome { af }
-          joint { af }
+          %s
         }
       }
-    }', formatted_id, dataset)
+    }', formatted_id, dataset, af_fields)
+    
   } else if (is_canonical_var) {
     query_string <- sprintf('{
       variant(variant_id: "%s", dataset: %s) {
-        genome { af }
-        exome { af }
-        joint { af }
+        %s
       }
-    }', formatted_id, dataset)
+    }', formatted_id, dataset, af_fields)
+    
+  } else if (is_pos_only) {
+    parts <- unlist(strsplit(formatted_id, "-"))
+    chr_val <- gsub("^chr", "", parts[1], ignore.case = TRUE)
+    pos_val <- as.numeric(parts[2])
+    
+    ref_genome <- if (grepl("r2", dataset)) "GRCh37" else "GRCh38"
+    query_string <- sprintf('{
+      region(chrom: "%s", start: %d, stop: %d, reference_genome: %s) {
+        variants(dataset: %s) {
+          variant_id
+          %s
+        }
+      }
+    }', chr_val, pos_val, pos_val, ref_genome, dataset, af_fields)
+    
   } else {
-    message("gnoMAD Fetch Skipped: ID '", formatted_id, "' is not in CHROM-POS-REF-ALT or rsID format.")
-    return("No REF/ALT Alleles")
+    message("gnoMAD Fetch Skipped: Could not parse ID '", formatted_id, "'")
+    return("Invalid Format")
   }
   
   tryCatch({
+    # Primary Request
     resp <- request("https://gnomad.broadinstitute.org/api") %>%
+      req_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) R-Shiny-App") %>%
       req_headers("Content-Type" = "application/json") %>%
       req_body_json(list(query = query_string)) %>%
       req_timeout(10) %>%
       req_error(is_error = function(resp) FALSE) %>%
       req_perform()
     
+    # If joint query failed or returned HTTP status >= 400, retry without joint field
     if (resp_status(resp) >= 400) {
-      message("gnoMAD API HTTP Error Code: ", resp_status(resp))
-      return("API Error")
+      err_msg <- resp_body_string(resp)
+      message("gnoMAD API HTTP Error ", resp_status(resp), ": ", err_msg)
+      
+      if (grepl("joint", query_string, ignore.case = TRUE)) {
+        fallback_query <- gsub(" joint \\{ af \\}", "", query_string)
+        resp_fb <- request("https://gnomad.broadinstitute.org/api") %>%
+          req_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) R-Shiny-App") %>%
+          req_headers("Content-Type" = "application/json") %>%
+          req_body_json(list(query = fallback_query)) %>%
+          req_timeout(10) %>%
+          req_error(is_error = function(resp) FALSE) %>%
+          req_perform()
+        
+        if (resp_status(resp_fb) < 400) {
+          resp <- resp_fb
+        } else {
+          return("API Error")
+        }
+      } else {
+        return("API Error")
+      }
     }
     
     res_data <- resp_body_json(resp)
     
     if (!is.null(res_data$errors)) {
-      message("gnoMAD GraphQL returned error: ", jsonlite::toJSON(res_data$errors))
+      message("gnoMAD GraphQL error: ", jsonlite::toJSON(res_data$errors))
       return("Not Found")
     }
     
-    # Extract variant object
+    if (is.null(res_data$data)) return("Not Found")
+    
+    var_res <- NULL
     if (is_rsid) {
       var_list <- res_data$data$rsid$variants
-      if (is.null(var_list) || length(var_list) == 0) return("Not Found")
-      var_res <- var_list[[1]]
-    } else {
+      if (!is.null(var_list) && length(var_list) > 0) var_res <- var_list[[1]]
+    } else if (is_canonical_var) {
       var_res <- res_data$data$variant
+    } else if (is_pos_only) {
+      var_list <- res_data$data$region$variants
+      if (!is.null(var_list) && length(var_list) > 0) var_res <- var_list[[1]]
     }
     
     if (is.null(var_res)) return("Not Found")
     
     af_val <- NULL
-    if (!is.null(var_res$joint) && !is.null(var_res$joint$af)) {
+    if (!is.null(var_res$joint$af)) {
       af_val <- var_res$joint$af
-    } else if (!is.null(var_res$genome) && !is.null(var_res$genome$af)) {
+    } else if (!is.null(var_res$genome$af)) {
       af_val <- var_res$genome$af
-    } else if (!is.null(var_res$exome) && !is.null(var_res$exome$af)) {
+    } else if (!is.null(var_res$exome$af)) {
       af_val <- var_res$exome$af
     }
     
-    if (is.null(af_val)) return("Not Found")
+    if (is.null(af_val) || is.na(af_val)) return("Not Found")
     return(formatC(as.numeric(af_val), format = "e", digits = 3))
     
   }, error = function(e) {
@@ -174,12 +269,12 @@ fetch_gnomad_af <- function(variant_id, dataset = "gnomad_r4") {
   })
 }
 
-# Store clicked annotations for each plot
+# Store clicked annotations
 clicked_point_sys1 <- reactiveVal(NULL)
 clicked_point_sys2 <- reactiveVal(NULL)
 clicked_point_overlay <- reactiveVal(NULL)
 
-# Define UI
+# UI Definition
 ui <- fluidPage(
   theme = shinytheme("cerulean"),
   navbarPage(
@@ -218,6 +313,16 @@ ui <- fluidPage(
                           column(6, selectInput("sys1_p_col", "P-Value Column", choices = NULL)),
                           column(6, selectInput("sys1_snp_col", "SNP ID Column", choices = NULL))
                         ),
+                        
+                        checkboxInput("sys1_has_ref_alt", "Dataset includes REF and ALT columns", value = FALSE),
+                        conditionalPanel(
+                          condition = "input.sys1_has_ref_alt == true",
+                          fluidRow(
+                            column(6, selectInput("sys1_ref_col", "REF Allele Column", choices = NULL)),
+                            column(6, selectInput("sys1_alt_col", "ALT Allele Column", choices = NULL))
+                          )
+                        ),
+                        
                         fluidRow(
                           column(6, textInput("sys1_chr_filter", "Chromosome Filter (e.g. 1, or blank)", value = "1")),
                           column(6, numericInput("sys1_p_thresh", "Max P-Value Threshold", value = 1e-5, step = 1e-6))
@@ -240,6 +345,16 @@ ui <- fluidPage(
                           column(6, selectInput("sys2_p_col", "P-Value Column", choices = NULL)),
                           column(6, selectInput("sys2_snp_col", "SNP ID Column", choices = NULL))
                         ),
+                        
+                        checkboxInput("sys2_has_ref_alt", "Dataset includes REF and ALT columns", value = FALSE),
+                        conditionalPanel(
+                          condition = "input.sys2_has_ref_alt == true",
+                          fluidRow(
+                            column(6, selectInput("sys2_ref_col", "REF Allele Column", choices = NULL)),
+                            column(6, selectInput("sys2_alt_col", "ALT Allele Column", choices = NULL))
+                          )
+                        ),
+                        
                         fluidRow(
                           column(6, textInput("sys2_chr_filter", "Chromosome Filter (e.g. 1, or blank)", value = "1")),
                           column(6, numericInput("sys2_p_thresh", "Max P-Value Threshold", value = 1e-5, step = 1e-6))
@@ -298,7 +413,7 @@ ui <- fluidPage(
   )
 )
 
-# Define server function   
+# Server Logic
 server <- function(input, output, session) {
   
   output$txtout <- renderText({
@@ -318,19 +433,24 @@ server <- function(input, output, session) {
     bp_default  <- grep("pos|bp", cols, ignore.case = TRUE, value = TRUE)[1]
     p_default   <- grep("^p$|p_val|p.val|pval", cols, ignore.case = TRUE, value = TRUE)[1]
     snp_default <- grep("snp|id|rs", cols, ignore.case = TRUE, value = TRUE)[1]
+    ref_default <- grep("^ref$|reference|a1|allele1", cols, ignore.case = TRUE, value = TRUE)[1]
+    alt_default <- grep("^alt$|alternate|a2|allele2", cols, ignore.case = TRUE, value = TRUE)[1]
     
     updateSelectInput(session, "sys1_chr_col", choices = cols, selected = ifelse(is.na(chr_default), cols[1], chr_default))
     updateSelectInput(session, "sys1_bp_col", choices = cols, selected = ifelse(is.na(bp_default), cols[1], bp_default))
     updateSelectInput(session, "sys1_p_col", choices = cols, selected = ifelse(is.na(p_default), cols[1], p_default))
     updateSelectInput(session, "sys1_snp_col", choices = cols, selected = ifelse(is.na(snp_default), cols[1], snp_default))
+    updateSelectInput(session, "sys1_ref_col", choices = cols, selected = ifelse(is.na(ref_default), cols[1], ref_default))
+    updateSelectInput(session, "sys1_alt_col", choices = cols, selected = ifelse(is.na(alt_default), cols[1], alt_default))
   })
   
   inp1 <- reactive({
-    req(sys1_raw(), input$sys1_chr_col, input$sys1_p_col)
+    req(sys1_raw(), input$sys1_chr_col, input$sys1_p_col, input$sys1_bp_col)
     
-    df <- sys1_raw()
+    df <- copy(sys1_raw())
     chr_col <- input$sys1_chr_col
-    p_col <- input$sys1_p_col
+    bp_col  <- input$sys1_bp_col
+    p_col   <- input$sys1_p_col
     
     target_chrs <- parse_chr_input(input$sys1_chr_filter)
     if (!is.null(target_chrs)) {
@@ -339,6 +459,30 @@ server <- function(input, output, session) {
     
     if (!is.null(input$sys1_p_thresh) && !is.na(input$sys1_p_thresh)) {
       df <- df[get(p_col) < as.numeric(input$sys1_p_thresh)]
+    }
+    
+    if (isTRUE(input$sys1_has_ref_alt) && !is.null(input$sys1_ref_col) && !is.null(input$sys1_alt_col)) {
+      ref_c <- input$sys1_ref_col
+      alt_c <- input$sys1_alt_col
+      
+      df[, gnomad_var_id := paste(
+        toupper(gsub("^chr", "", get(chr_col), ignore.case = TRUE)),
+        get(bp_col),
+        toupper(get(ref_c)),
+        toupper(get(alt_c)),
+        sep = "-"
+      )]
+    } else {
+      snp_c <- input$sys1_snp_col
+      if (!is.null(snp_c) && snp_c %in% names(df)) {
+        df[, gnomad_var_id := as.character(get(snp_c))]
+      } else {
+        df[, gnomad_var_id := paste(
+          toupper(gsub("^chr", "", get(chr_col), ignore.case = TRUE)),
+          get(bp_col), 
+          sep = "-"
+        )]
+      }
     }
     
     df
@@ -357,19 +501,24 @@ server <- function(input, output, session) {
     bp_default  <- grep("pos|bp", cols, ignore.case = TRUE, value = TRUE)[1]
     p_default   <- grep("^p$|p_val|p.val|pval", cols, ignore.case = TRUE, value = TRUE)[1]
     snp_default <- grep("snp|id|rs", cols, ignore.case = TRUE, value = TRUE)[1]
+    ref_default <- grep("^ref$|reference|a1|allele1", cols, ignore.case = TRUE, value = TRUE)[1]
+    alt_default <- grep("^alt$|alternate|a2|allele2", cols, ignore.case = TRUE, value = TRUE)[1]
     
     updateSelectInput(session, "sys2_chr_col", choices = cols, selected = ifelse(is.na(chr_default), cols[1], chr_default))
     updateSelectInput(session, "sys2_bp_col", choices = cols, selected = ifelse(is.na(bp_default), cols[1], bp_default))
     updateSelectInput(session, "sys2_p_col", choices = cols, selected = ifelse(is.na(p_default), cols[1], p_default))
     updateSelectInput(session, "sys2_snp_col", choices = cols, selected = ifelse(is.na(snp_default), cols[1], snp_default))
+    updateSelectInput(session, "sys2_ref_col", choices = cols, selected = ifelse(is.na(ref_default), cols[1], ref_default))
+    updateSelectInput(session, "sys2_alt_col", choices = cols, selected = ifelse(is.na(alt_default), cols[1], alt_default))
   })
   
   inp2 <- reactive({
-    req(sys2_raw(), input$sys2_chr_col, input$sys2_p_col)
+    req(sys2_raw(), input$sys2_chr_col, input$sys2_p_col, input$sys2_bp_col)
     
-    df <- sys2_raw()
+    df <- copy(sys2_raw())
     chr_col <- input$sys2_chr_col
-    p_col <- input$sys2_p_col
+    bp_col  <- input$sys2_bp_col
+    p_col   <- input$sys2_p_col
     
     target_chrs <- parse_chr_input(input$sys2_chr_filter)
     if (!is.null(target_chrs)) {
@@ -378,6 +527,30 @@ server <- function(input, output, session) {
     
     if (!is.null(input$sys2_p_thresh) && !is.na(input$sys2_p_thresh)) {
       df <- df[get(p_col) < as.numeric(input$sys2_p_thresh)]
+    }
+    
+    if (isTRUE(input$sys2_has_ref_alt) && !is.null(input$sys2_ref_col) && !is.null(input$sys2_alt_col)) {
+      ref_c <- input$sys2_ref_col
+      alt_c <- input$sys2_alt_col
+      
+      df[, gnomad_var_id := paste(
+        toupper(gsub("^chr", "", get(chr_col), ignore.case = TRUE)),
+        get(bp_col),
+        toupper(get(ref_c)),
+        toupper(get(alt_c)),
+        sep = "-"
+      )]
+    } else {
+      snp_c <- input$sys2_snp_col
+      if (!is.null(snp_c) && snp_c %in% names(df)) {
+        df[, gnomad_var_id := as.character(get(snp_c))]
+      } else {
+        df[, gnomad_var_id := paste(
+          toupper(gsub("^chr", "", get(chr_col), ignore.case = TRUE)),
+          get(bp_col), 
+          sep = "-"
+        )]
+      }
     }
     
     df
@@ -405,15 +578,15 @@ server <- function(input, output, session) {
   })
   
   output$manhattanPlot1 <- renderPlotly({
-    req(inp1(), input$sys1_chr_col, input$sys1_bp_col, input$sys1_p_col, input$sys1_snp_col)
+    req(inp1(), input$sys1_chr_col, input$sys1_bp_col, input$sys1_p_col)
     
     p1 <- manhattanly(
       inp1(),
       chr = input$sys1_chr_col,
       bp = input$sys1_bp_col,
       p = input$sys1_p_col,
-      snp = input$sys1_snp_col,
-      annotation1 = input$sys1_snp_col,
+      snp = "gnomad_var_id",
+      annotation1 = "gnomad_var_id",
       annotation2 = input$sys1_bp_col,
       col = c(input$sys1_col, input$sys1_col)
     )
@@ -422,15 +595,15 @@ server <- function(input, output, session) {
   })
   
   output$manhattanPlot2 <- renderPlotly({
-    req(inp2(), input$sys2_chr_col, input$sys2_bp_col, input$sys2_p_col, input$sys2_snp_col)
+    req(inp2(), input$sys2_chr_col, input$sys2_bp_col, input$sys2_p_col)
     
     p2 <- manhattanly(
       inp2(),
       chr = input$sys2_chr_col,
       bp = input$sys2_bp_col,
       p = input$sys2_p_col,
-      snp = input$sys2_snp_col,
-      annotation1 = input$sys2_snp_col,
+      snp = "gnomad_var_id",
+      annotation1 = "gnomad_var_id",
       annotation2 = input$sys2_bp_col,
       col = c(input$sys2_col, input$sys2_col)
     )
@@ -438,16 +611,15 @@ server <- function(input, output, session) {
     layout(p2, uirevision = "manhattanPlot2_state")
   })
   
-  output$overlayPlot <- renderPlotly({
-    req(inp1(), inp2(), input$sys1_chr_col, input$sys1_bp_col, input$sys1_p_col, input$sys1_snp_col)
-    req(input$sys2_chr_col, input$sys2_bp_col, input$sys2_p_col, input$sys2_snp_col)
+  output$overlayPlot <- renderPlotly({     req(inp1(), inp2(), input$sys1_chr_col, input$sys1_bp_col, input$sys1_p_col)
+    req(input$sys2_chr_col, input$sys2_bp_col, input$sys2_p_col)
     
     d1 <- copy(inp1())
     d1[, `:=`(
       CHR_plot = as.character(get(input$sys1_chr_col)),
       BP_plot  = as.numeric(get(input$sys1_bp_col)),
       P_plot   = -log10(as.numeric(get(input$sys1_p_col))),
-      SNP_plot = as.character(get(input$sys1_snp_col))
+      SNP_plot = as.character(gnomad_var_id)
     )]
     
     d2 <- copy(inp2())
@@ -455,7 +627,7 @@ server <- function(input, output, session) {
       CHR_plot = as.character(get(input$sys2_chr_col)),
       BP_plot  = as.numeric(get(input$sys2_bp_col)),
       P_plot   = -log10(as.numeric(get(input$sys2_p_col))),
-      SNP_plot = as.character(get(input$sys2_snp_col))
+      SNP_plot = as.character(gnomad_var_id)
     )]
     
     p_overlay <- plot_ly() %>%
@@ -512,6 +684,7 @@ server <- function(input, output, session) {
     )
   })
   
+  # Synchronize Zoom/Pan across individual plots
   observeEvent(event_data("plotly_relayout", source = "manhattanPlot1"), {
     relayout_data <- event_data("plotly_relayout", source = "manhattanPlot1")
     if (!is.null(relayout_data)) {
@@ -540,13 +713,18 @@ server <- function(input, output, session) {
           plotlyProxyInvoke("relayout", list(annotations = list()))
       } else {
         raw_val <- if (!is.null(click_data$customdata)) click_data$customdata else click_data$text
-        snp_id <- clean_variant_id(raw_val)
-        if (is.null(snp_id) || !nzchar(snp_id)) snp_id <- paste0(click_data$x)
+        chr_fb  <- parse_chr_input(input$sys1_chr_filter)[1]
+        bp_fb   <- click_data$x
+        
+        snp_id <- clean_variant_id(raw_val, chr_fallback = chr_fb, bp_fallback = bp_fb)
+        if (is.null(snp_id) || !nzchar(snp_id)) {
+          snp_id <- paste(ifelse(is.null(chr_fb), "1", chr_fb), bp_fb, sep = "-")
+        }
         
         af_val <- fetch_gnomad_af(snp_id, input$gnomad_build)
         
         hover_txt <- paste0(
-          "<b>SNP:</b> ", snp_id, "<br>",
+          "<b>SNP/Variant:</b> ", snp_id, "<br>",
           "<b>BP:</b> ", click_data$x, "<br>",
           "<b>-log10(P):</b> ", round(click_data$y, 3), "<br>",
           "<b>gnoMAD AF:</b> ", af_val
@@ -561,7 +739,6 @@ server <- function(input, output, session) {
           yanchor = "bottom",
           bgcolor = "rgba(255, 255, 255, 0.95)",
           bordercolor = "#444444",
-          borderwidth = 1,
           borderpad = 6,
           font = list(size = 12, color = "#000000")
         )
@@ -583,13 +760,18 @@ server <- function(input, output, session) {
           plotlyProxyInvoke("relayout", list(annotations = list()))
       } else {
         raw_val <- if (!is.null(click_data$customdata)) click_data$customdata else click_data$text
-        snp_id <- clean_variant_id(raw_val)
-        if (is.null(snp_id) || !nzchar(snp_id)) snp_id <- paste0(click_data$x)
+        chr_fb  <- parse_chr_input(input$sys2_chr_filter)[1]
+        bp_fb   <- click_data$x
+        
+        snp_id <- clean_variant_id(raw_val, chr_fallback = chr_fb, bp_fallback = bp_fb)
+        if (is.null(snp_id) || !nzchar(snp_id)) {
+          snp_id <- paste(ifelse(is.null(chr_fb), "1", chr_fb), bp_fb, sep = "-")
+        }
         
         af_val <- fetch_gnomad_af(snp_id, input$gnomad_build)
         
         hover_txt <- paste0(
-          "<b>SNP:</b> ", snp_id, "<br>",
+          "<b>SNP/Variant:</b> ", snp_id, "<br>",
           "<b>BP:</b> ", click_data$x, "<br>",
           "<b>-log10(P):</b> ", round(click_data$y, 3), "<br>",
           "<b>gnoMAD AF:</b> ", af_val
@@ -604,7 +786,6 @@ server <- function(input, output, session) {
           yanchor = "bottom",
           bgcolor = "rgba(255, 255, 255, 0.95)",
           bordercolor = "#444444",
-          borderwidth = 1,
           borderpad = 6,
           font = list(size = 12, color = "#000000")
         )
@@ -626,13 +807,18 @@ server <- function(input, output, session) {
           plotlyProxyInvoke("relayout", list(annotations = list()))
       } else {
         raw_val <- if (!is.null(click_data$customdata)) click_data$customdata else click_data$text
-        snp_id <- clean_variant_id(raw_val)
-        if (is.null(snp_id) || !nzchar(snp_id)) snp_id <- paste0(click_data$x)
+        chr_fb  <- parse_chr_input(input$sys1_chr_filter)[1]
+        bp_fb   <- click_data$x
+        
+        snp_id <- clean_variant_id(raw_val, chr_fallback = chr_fb, bp_fallback = bp_fb)
+        if (is.null(snp_id) || !nzchar(snp_id)) {
+          snp_id <- paste(ifelse(is.null(chr_fb), "1", chr_fb), bp_fb, sep = "-")
+        }
         
         af_val <- fetch_gnomad_af(snp_id, input$gnomad_build)
         
         hover_txt <- paste0(
-          "<b>SNP:</b> ", snp_id, "<br>",
+          "<b>SNP/Variant:</b> ", snp_id, "<br>",
           "<b>BP:</b> ", click_data$x, "<br>",
           "<b>-log10(P):</b> ", round(click_data$y, 3), "<br>",
           "<b>gnoMAD AF:</b> ", af_val
@@ -647,7 +833,6 @@ server <- function(input, output, session) {
           yanchor = "bottom",
           bgcolor = "rgba(255, 255, 255, 0.95)",
           bordercolor = "#444444",
-          borderwidth = 1,
           borderpad = 6,
           font = list(size = 12, color = "#000000")
         )
