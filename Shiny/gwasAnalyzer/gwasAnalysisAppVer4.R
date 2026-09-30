@@ -72,7 +72,6 @@ build_gnomad_url <- function(query, dataset) {
   return(paste0("https://gnomad.broadinstitute.org/search?dataset=", dataset, "&q=", URLencode(q, reserved = TRUE)))
 }
 
-# Robust Variant Cleaner with Fallback Support
 clean_variant_id <- function(raw_input, chr_fallback = NULL, bp_fallback = NULL) {
   if (is.null(raw_input) || length(raw_input) == 0) {
     if (!is.null(chr_fallback) && !is.null(bp_fallback)) {
@@ -84,7 +83,15 @@ clean_variant_id <- function(raw_input, chr_fallback = NULL, bp_fallback = NULL)
   }
   
   raw_str <- unlist(raw_input)[1]
-  if (is.na(raw_str) || !nzchar(raw_str)) return(NULL)
+  if (is.na(raw_str) || !nzchar(raw_str)) {
+    if (!is.null(chr_fallback) && !is.null(bp_fallback)) {
+      c_val <- toupper(gsub("^chr", "", as.character(chr_fallback), ignore.case = TRUE))
+      b_val <- as.character(bp_fallback)
+      if (nzchar(c_val) && nzchar(b_val)) return(paste(c_val, b_val, sep = "-"))
+    }
+    return(NULL)
+  }
+  
   raw_str <- as.character(raw_str)
   
   # Strip HTML tags & newlines
@@ -109,17 +116,7 @@ clean_variant_id <- function(raw_input, chr_fallback = NULL, bp_fallback = NULL)
     return(toupper(paste(m_pos[2], m_pos[3], sep = "-")))
   }
   
-  # 4. Try extracting CHR and BP from hover text labels
-  m_chr_label <- regmatches(clean_str, regexec("CHR[:\\s]+(?:chr)?([0-9]{1,2}|X|Y|MT|M)", clean_str, ignore.case = TRUE))[[1]]
-  m_bp_label  <- regmatches(clean_str, regexec("BP[:\\s]+([0-9]+)", clean_str, ignore.case = TRUE))[[1]]
-  
-  if (length(m_chr_label) >= 2 && length(m_bp_label) >= 2) {
-    c_val <- toupper(m_chr_label[2])
-    b_val <- m_bp_label[2]
-    return(paste(c_val, b_val, sep = "-"))
-  }
-  
-  # 5. Fallback to passed chromosome & BP if available
+  # 4. Fallback to passed chromosome & BP if available
   if (!is.null(chr_fallback) && !is.null(bp_fallback)) {
     c_val <- toupper(gsub("^chr", "", as.character(chr_fallback), ignore.case = TRUE))
     b_val <- as.character(bp_fallback)
@@ -128,7 +125,6 @@ clean_variant_id <- function(raw_input, chr_fallback = NULL, bp_fallback = NULL)
     }
   }
   
-  # 6. If simple string with no spaces, return trimmed
   trimmed <- trimws(clean_str)
   if (!grepl("\\s", trimmed) && nzchar(trimmed)) {
     return(toupper(trimmed))
@@ -910,19 +906,31 @@ server <- function(input, output, session) {
       } else {
         raw_val <- click_data$key
         if (is.null(raw_val)) raw_val <- click_data$customdata
-        if (is.null(raw_val)) raw_val <- click_data$text
-        chr_fb  <- parse_chr_input(input$sys1_chr_filter)[1]
-        bp_fb   <- click_data$x
         
-        snp_id <- clean_variant_id(raw_val, chr_fallback = chr_fb, bp_fallback = bp_fb)
+        # Safely extract CHR from hover text if present
+        txt_content <- click_data$text
+        chr_extracted <- NULL
+        if (!is.null(txt_content)) {
+          m_chr <- regmatches(txt_content, regexec("CHR:\\s*([0-9A-Za-z]+)", txt_content))[[1]]
+          if (length(m_chr) >= 2) chr_extracted <- m_chr[2]
+        }
+        
+        if (is.null(chr_extracted)) {
+          chr_extracted <- parse_chr_input(input$sys1_chr_filter)[1]
+        }
+        
+        bp_fb <- click_data$x
+        
+        snp_id <- clean_variant_id(raw_val, chr_fallback = chr_extracted, bp_fallback = bp_fb)
         if (is.null(snp_id) || !nzchar(snp_id)) {
-          snp_id <- paste(ifelse(is.null(chr_fb), "1", chr_fb), bp_fb, sep = "-")
+          snp_id <- paste(ifelse(is.null(chr_extracted), "1", chr_extracted), bp_fb, sep = "-")
         }
         
         af_val <- fetch_gnomad_af(snp_id, input$gnomad_build)
         
         hover_txt <- paste0(
           "<b>SNP/Variant:</b> ", snp_id, "<br>",
+          "<b>CHR:</b> ", ifelse(is.null(chr_extracted), "N/A", chr_extracted), "<br>",
           "<b>BP:</b> ", click_data$x, "<br>",
           "<b>-log10(P):</b> ", round(click_data$y, 3), "<br>",
           "<b>gnoMAD AF:</b> ", af_val
