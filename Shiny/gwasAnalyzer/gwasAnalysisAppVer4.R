@@ -279,6 +279,7 @@ ui <- fluidPage(
   theme = shinytheme("cerulean"),
   navbarPage(
     "My first app",
+    id = "navbar",
     tabPanel("Navbar 1",
              sidebarPanel(
                tags$h2("Input:"),
@@ -385,7 +386,31 @@ ui <- fluidPage(
                )
              ),
              
+             fluidRow(
+               column(12,
+                      actionButton("go_to_nav3", "Download data", class = "btn-primary", style = "margin-bottom: 15px;")
+               )
+             ),
+             
              uiOutput("plot_container"),
+             
+             hr(),
+             
+             # Region Data Preview Tables (< 50 points threshold)
+             fluidRow(
+               column(6,
+                      wellPanel(
+                        h4("System 1 Region Preview"),
+                        uiOutput("sys1_preview_ui")
+                      )
+               ),
+               column(6,
+                      wellPanel(
+                        h4("System 2 Region Preview"),
+                        uiOutput("sys2_preview_ui")
+                      )
+               )
+             ),
              
              hr(),
              
@@ -407,14 +432,24 @@ ui <- fluidPage(
     ),
     
     tabPanel("Navbar 3", 
+             h3("Full Datasets"),
              dataTableOutput("table1"),
-             dataTableOutput("table2")
+             dataTableOutput("table2"),
+             
+             hr(),
+             
+             h3("Region-Filtered Datasets"),
+             downloadButton("download_tables", "Download tables", class = "btn-success"),
+             br(), br(),
+             dataTableOutput("filtered_table1"),
+             dataTableOutput("filtered_table2")
     )
   )
 )
 
 # Server Logic
 server <- function(input, output, session) {
+  
   
   output$txtout <- renderText({
     paste(input$txt1, input$txt2, sep = " ")
@@ -852,6 +887,113 @@ server <- function(input, output, session) {
     req(inp2())
     datatable(inp2())
   })
+  # --- REGION FILTERING REACTIVES ---
+  sys1_range <- reactive({
+    relayout <- event_data("plotly_relayout", source = if (identical(input$plot_mode, "overlay")) "overlayPlot" else "manhattanPlot1")
+    if (is.null(relayout)) return(NULL)
+    
+    x0 <- relayout[["xaxis.range[0]"]]
+    x1 <- relayout[["xaxis.range[1]"]]
+    if (!is.null(x0) && !is.null(x1)) return(c(as.numeric(x0), as.numeric(x1)))
+    if (!is.null(relayout[["xaxis.range"]])) return(as.numeric(relayout[["xaxis.range"]]))
+    return(NULL)
+  })
+  
+  inp1_region <- reactive({
+    df <- inp1()
+    req(df, input$sys1_bp_col)
+    rng <- sys1_range()
+    if (!is.null(rng)) {
+      bp_col <- input$sys1_bp_col
+      df <- df[get(bp_col) >= rng[1] & get(bp_col) <= rng[2]]
+    }
+    df
+  })
+  
+  sys2_range <- reactive({
+    relayout <- event_data("plotly_relayout", source = if (identical(input$plot_mode, "overlay")) "overlayPlot" else "manhattanPlot2")
+    if (is.null(relayout)) return(NULL)
+    
+    x0 <- relayout[["xaxis.range[0]"]]
+    x1 <- relayout[["xaxis.range[1]"]]
+    if (!is.null(x0) && !is.null(x1)) return(c(as.numeric(x0), as.numeric(x1)))
+    if (!is.null(relayout[["xaxis.range"]])) return(as.numeric(relayout[["xaxis.range"]]))
+    return(NULL)
+  })
+  
+  inp2_region <- reactive({
+    df <- inp2()
+    req(df, input$sys2_bp_col)
+    rng <- sys2_range()
+    if (!is.null(rng)) {
+      bp_col <- input$sys2_bp_col
+      df <- df[get(bp_col) >= rng[1] & get(bp_col) <= rng[2]]
+    }
+    df
+  })
+  
+  # --- NAVIGATION BUTTON ---
+  observeEvent(input$go_to_nav3, {
+    updateNavbarPage(session, "navbar", selected = "Navbar 3")
+  })
+  
+  # --- NAVBAR 2 PREVIEW TABLES (< 50 POINTS CHECK) ---
+  output$sys1_preview_ui <- renderUI({
+    df <- inp1_region()
+    if (is.null(df)) return(p("No dataset loaded."))
+    if (nrow(df) >= 50) {
+      p(sprintf("Region contains %d points. Zoom in until there are fewer than 50 points to show preview.", nrow(df)))
+    } else {
+      DTOutput("sys1_preview_table")
+    }
+  })
+  
+  output$sys1_preview_table <- renderDT({
+    req(inp1_region())
+    datatable(inp1_region(), options = list(pageLength = 5, scrollX = TRUE))
+  })
+  
+  output$sys2_preview_ui <- renderUI({
+    df <- inp2_region()
+    if (is.null(df)) return(p("No dataset loaded."))
+    if (nrow(df) >= 50) {
+      p(sprintf("Region contains %d points. Zoom in until there are fewer than 50 points to show preview.", nrow(df)))
+    } else {
+      DTOutput("sys2_preview_table")
+    }
+  })
+  
+  output$sys2_preview_table <- renderDT({
+    req(inp2_region())
+    datatable(inp2_region(), options = list(pageLength = 5, scrollX = TRUE))
+  })
+  
+  # --- NAVBAR 3 FILTERED TABLES & DOWNLOAD ---
+  output$filtered_table1 <- renderDataTable({
+    req(inp1_region())
+    datatable(inp1_region(), options = list(scrollX = TRUE))
+  })
+  
+  output$filtered_table2 <- renderDataTable({
+    req(inp2_region())
+    datatable(inp2_region(), options = list(scrollX = TRUE))
+  })
+  
+  output$download_tables <- downloadHandler(
+    filename = function() {
+      paste0("region_filtered_tables_", Sys.Date(), ".zip")
+    },
+    content = function(file) {
+      tmpdir <- tempdir()
+      f1 <- file.path(tmpdir, "sys1_region_filtered.csv")
+      f2 <- file.path(tmpdir, "sys2_region_filtered.csv")
+      
+      write.csv(inp1_region(), f1, row.names = FALSE)
+      write.csv(inp2_region(), f2, row.names = FALSE)
+      
+      zip(file, files = c(f1, f2), flags = "-j")
+    }
+  )
 }
 
 shinyApp(ui = ui, server = server)
