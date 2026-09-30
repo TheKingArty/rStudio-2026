@@ -272,11 +272,11 @@ clicked_point_overlay <- reactiveVal(NULL)
 
 # UI Definition
 ui <- fluidPage(
-  theme = shinytheme("cerulean"),
+  theme = shinytheme("flatly"),
   navbarPage(
-    "My first app",
+    "GAnalyzer",
     id = "navbar",
-    tabPanel("Navbar 1",
+    tabPanel("Name",
              sidebarPanel(
                tags$h2("Input:"),
                textInput("txt1", "First Name:", ""),
@@ -288,7 +288,7 @@ ui <- fluidPage(
                verbatimTextOutput("txtout")
              )
     ),
-    tabPanel("Navbar 2",
+    tabPanel("Plot",
              titlePanel("Interactive GWAS Manhattan Plot"),
              fluidRow(
                column(width = 6, fileInput("sys1_file", "Upload Sys 1 Dataset", accept = c(".tsv", ".logistic", ".txt", ".csv"))),
@@ -437,7 +437,7 @@ ui <- fluidPage(
              )
     ),
     
-    tabPanel("Navbar 3", 
+    tabPanel("Table", 
              h3("Full Datasets"),
              dataTableOutput("table1"),
              dataTableOutput("table2"),

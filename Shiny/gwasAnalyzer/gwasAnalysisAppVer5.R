@@ -12,6 +12,11 @@ library(jsonlite)
 # Set max upload size to 1GB
 options(shiny.maxRequestSize = 1000 * 1024^2)
 
+# Fallback operator for safe column selection
+`%||%` <- function(x, y) {
+  if (length(x) > 0 && !is.na(x[1]) && nzchar(as.character(x[1]))) x else y
+}
+
 # Helper function to parse chromosome range inputs like "1, 3, 5-7"
 parse_chr_input <- function(input_str) {
   if (!nzchar(trimws(input_str))) return(NULL)
@@ -146,7 +151,6 @@ fetch_gnomad_af <- function(variant_id, dataset = "gnomad_r4") {
   is_canonical_var <- grepl("^([0-9]{1,2}|X|Y|MT|M)-[0-9]+-[^-]+-[^-]+$", formatted_id, ignore.case = TRUE)
   is_pos_only      <- grepl("^([0-9]{1,2}|X|Y|MT|M)-[0-9]+$", formatted_id, ignore.case = TRUE)
   
-  # Conditionally request joint AF only for v4 dataset
   af_fields <- if (identical(dataset, "gnomad_r4")) {
     "genome { af } exome { af } joint { af }"
   } else {
@@ -186,12 +190,10 @@ fetch_gnomad_af <- function(variant_id, dataset = "gnomad_r4") {
     }', chr_val, pos_val, pos_val, ref_genome, dataset, af_fields)
     
   } else {
-    message("gnoMAD Fetch Skipped: Could not parse ID '", formatted_id, "'")
     return("Invalid Format")
   }
   
   tryCatch({
-    # Primary Request
     resp <- request("https://gnomad.broadinstitute.org/api") %>%
       req_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) R-Shiny-App") %>%
       req_headers("Content-Type" = "application/json") %>%
@@ -200,11 +202,7 @@ fetch_gnomad_af <- function(variant_id, dataset = "gnomad_r4") {
       req_error(is_error = function(resp) FALSE) %>%
       req_perform()
     
-    # If joint query failed or returned HTTP status >= 400, retry without joint field
     if (resp_status(resp) >= 400) {
-      err_msg <- resp_body_string(resp)
-      message("gnoMAD API HTTP Error ", resp_status(resp), ": ", err_msg)
-      
       if (grepl("joint", query_string, ignore.case = TRUE)) {
         fallback_query <- gsub(" joint \\{ af \\}", "", query_string)
         resp_fb <- request("https://gnomad.broadinstitute.org/api") %>%
@@ -226,13 +224,7 @@ fetch_gnomad_af <- function(variant_id, dataset = "gnomad_r4") {
     }
     
     res_data <- resp_body_json(resp)
-    
-    if (!is.null(res_data$errors)) {
-      message("gnoMAD GraphQL error: ", jsonlite::toJSON(res_data$errors))
-      return("Not Found")
-    }
-    
-    if (is.null(res_data$data)) return("Not Found")
+    if (!is.null(res_data$errors) || is.null(res_data$data)) return("Not Found")
     
     var_res <- NULL
     if (is_rsid) {
@@ -260,14 +252,15 @@ fetch_gnomad_af <- function(variant_id, dataset = "gnomad_r4") {
     return(formatC(as.numeric(af_val), format = "e", digits = 3))
     
   }, error = function(e) {
-    message("gnoMAD Fetch Exception: ", e$message)
     return("Error Fetching")
   })
 }
 
-# Store clicked annotations
+# Store clicked annotations for up to 4 datasets + overlay
 clicked_point_sys1 <- reactiveVal(NULL)
 clicked_point_sys2 <- reactiveVal(NULL)
+clicked_point_sys3 <- reactiveVal(NULL)
+clicked_point_sys4 <- reactiveVal(NULL)
 clicked_point_overlay <- reactiveVal(NULL)
 
 # UI Definition
@@ -290,74 +283,156 @@ ui <- fluidPage(
     ),
     tabPanel("Navbar 2",
              titlePanel("Interactive GWAS Manhattan Plot"),
+             
+             # Dataset count selector slider
              fluidRow(
-               column(width = 6, fileInput("sys1_file", "Upload Sys 1 Dataset", accept = c(".tsv", ".logistic", ".txt", ".csv"))),
-               column(width = 6, fileInput("sys2_file", "Upload Sys 2 Dataset", accept = c(".tsv", ".logistic", ".txt", ".csv")))
+               column(6,
+                      wellPanel(
+                        sliderInput("num_datasets", "Number of Datasets to Analyze:", 
+                                    min = 1, max = 4, value = 2, step = 1)
+                      )
+               )
+             ),
+             
+             # File Uploads (Dynamic based on num_datasets)
+             fluidRow(
+               column(3, conditionalPanel(condition = "input.num_datasets >= 1", fileInput("sys1_file", "Upload Sys 1 Dataset", accept = c(".tsv", ".logistic", ".txt", ".csv")))),
+               column(3, conditionalPanel(condition = "input.num_datasets >= 2", fileInput("sys2_file", "Upload Sys 2 Dataset", accept = c(".tsv", ".logistic", ".txt", ".csv")))),
+               column(3, conditionalPanel(condition = "input.num_datasets >= 3", fileInput("sys3_file", "Upload Sys 3 Dataset", accept = c(".tsv", ".logistic", ".txt", ".csv")))),
+               column(3, conditionalPanel(condition = "input.num_datasets >= 4", fileInput("sys4_file", "Upload Sys 4 Dataset", accept = c(".tsv", ".logistic", ".txt", ".csv"))))
              ),
              
              hr(),
              
+             # Settings Panels Row 1 (System 1 & System 2)
              fluidRow(
-               # System 1 Controls
                column(6,
-                      wellPanel(
-                        h4("System 1 Settings"),
-                        fluidRow(
-                          column(6, selectInput("sys1_chr_col", "Chromosome Column", choices = NULL)),
-                          column(6, selectInput("sys1_bp_col", "Position (BP) Column", choices = NULL))
-                        ),
-                        fluidRow(
-                          column(6, selectInput("sys1_p_col", "P-Value Column", choices = NULL)),
-                          column(6, selectInput("sys1_snp_col", "SNP ID Column", choices = NULL))
-                        ),
-                        
-                        checkboxInput("sys1_has_ref_alt", "Dataset includes REF and ALT columns", value = FALSE),
-                        conditionalPanel(
-                          condition = "input.sys1_has_ref_alt == true",
+                      conditionalPanel(
+                        condition = "input.num_datasets >= 1",
+                        wellPanel(
+                          h4("System 1 Settings"),
                           fluidRow(
-                            column(6, selectInput("sys1_ref_col", "REF Allele Column", choices = NULL)),
-                            column(6, selectInput("sys1_alt_col", "ALT Allele Column", choices = NULL))
+                            column(6, selectInput("sys1_chr_col", "Chromosome Column", choices = NULL)),
+                            column(6, selectInput("sys1_bp_col", "Position (BP) Column", choices = NULL))
+                          ),
+                          fluidRow(
+                            column(6, selectInput("sys1_p_col", "P-Value Column", choices = NULL)),
+                            column(6, selectInput("sys1_snp_col", "SNP ID Column", choices = NULL))
+                          ),
+                          checkboxInput("sys1_has_ref_alt", "Dataset includes REF and ALT columns", value = FALSE),
+                          conditionalPanel(
+                            condition = "input.sys1_has_ref_alt == true",
+                            fluidRow(
+                              column(6, selectInput("sys1_ref_col", "REF Allele Column", choices = NULL)),
+                              column(6, selectInput("sys1_alt_col", "ALT Allele Column", choices = NULL))
+                            )
+                          ),
+                          fluidRow(
+                            column(6, textInput("sys1_chr_filter", "Chromosome Filter (e.g. 1, or blank)", value = "1")),
+                            column(6, numericInput("sys1_p_thresh", "Max P-Value Threshold", value = 1e-5, step = 1e-6))
+                          ),
+                          fluidRow(
+                            column(12, colourInput("sys1_col", "System 1 Point Color", value = "#1F77B4"))
                           )
-                        ),
-                        
-                        fluidRow(
-                          column(6, textInput("sys1_chr_filter", "Chromosome Filter (e.g. 1, or blank)", value = "1")),
-                          column(6, numericInput("sys1_p_thresh", "Max P-Value Threshold", value = 1e-5, step = 1e-6))
-                        ),
-                        fluidRow(
-                          column(12, colourInput("sys1_col", "System 1 Point Color", value = "#1F77B4"))
                         )
                       )
                ),
                
-               # System 2 Controls
                column(6,
-                      wellPanel(
-                        h4("System 2 Settings"),
-                        fluidRow(
-                          column(6, selectInput("sys2_chr_col", "Chromosome Column", choices = NULL)),
-                          column(6, selectInput("sys2_bp_col", "Position (BP) Column", choices = NULL))
-                        ),
-                        fluidRow(
-                          column(6, selectInput("sys2_p_col", "P-Value Column", choices = NULL)),
-                          column(6, selectInput("sys2_snp_col", "SNP ID Column", choices = NULL))
-                        ),
-                        
-                        checkboxInput("sys2_has_ref_alt", "Dataset includes REF and ALT columns", value = FALSE),
-                        conditionalPanel(
-                          condition = "input.sys2_has_ref_alt == true",
+                      conditionalPanel(
+                        condition = "input.num_datasets >= 2",
+                        wellPanel(
+                          h4("System 2 Settings"),
                           fluidRow(
-                            column(6, selectInput("sys2_ref_col", "REF Allele Column", choices = NULL)),
-                            column(6, selectInput("sys2_alt_col", "ALT Allele Column", choices = NULL))
+                            column(6, selectInput("sys2_chr_col", "Chromosome Column", choices = NULL)),
+                            column(6, selectInput("sys2_bp_col", "Position (BP) Column", choices = NULL))
+                          ),
+                          fluidRow(
+                            column(6, selectInput("sys2_p_col", "P-Value Column", choices = NULL)),
+                            column(6, selectInput("sys2_snp_col", "SNP ID Column", choices = NULL))
+                          ),
+                          checkboxInput("sys2_has_ref_alt", "Dataset includes REF and ALT columns", value = FALSE),
+                          conditionalPanel(
+                            condition = "input.sys2_has_ref_alt == true",
+                            fluidRow(
+                              column(6, selectInput("sys2_ref_col", "REF Allele Column", choices = NULL)),
+                              column(6, selectInput("sys2_alt_col", "ALT Allele Column", choices = NULL))
+                            )
+                          ),
+                          fluidRow(
+                            column(6, textInput("sys2_chr_filter", "Chromosome Filter (e.g. 1, or blank)", value = "1")),
+                            column(6, numericInput("sys2_p_thresh", "Max P-Value Threshold", value = 1e-5, step = 1e-6))
+                          ),
+                          fluidRow(
+                            column(12, colourInput("sys2_col", "System 2 Point Color", value = "#FF7F0E"))
                           )
-                        ),
-                        
-                        fluidRow(
-                          column(6, textInput("sys2_chr_filter", "Chromosome Filter (e.g. 1, or blank)", value = "1")),
-                          column(6, numericInput("sys2_p_thresh", "Max P-Value Threshold", value = 1e-5, step = 1e-6))
-                        ),
-                        fluidRow(
-                          column(12, colourInput("sys2_col", "System 2 Point Color", value = "#FF7F0E"))
+                        )
+                      )
+               )
+             ),
+             
+             # Settings Panels Row 2 (System 3 & System 4)
+             fluidRow(
+               column(6,
+                      conditionalPanel(
+                        condition = "input.num_datasets >= 3",
+                        wellPanel(
+                          h4("System 3 Settings"),
+                          fluidRow(
+                            column(6, selectInput("sys3_chr_col", "Chromosome Column", choices = NULL)),
+                            column(6, selectInput("sys3_bp_col", "Position (BP) Column", choices = NULL))
+                          ),
+                          fluidRow(
+                            column(6, selectInput("sys3_p_col", "P-Value Column", choices = NULL)),
+                            column(6, selectInput("sys3_snp_col", "SNP ID Column", choices = NULL))
+                          ),
+                          checkboxInput("sys3_has_ref_alt", "Dataset includes REF and ALT columns", value = FALSE),
+                          conditionalPanel(
+                            condition = "input.sys3_has_ref_alt == true",
+                            fluidRow(
+                              column(6, selectInput("sys3_ref_col", "REF Allele Column", choices = NULL)),
+                              column(6, selectInput("sys3_alt_col", "ALT Allele Column", choices = NULL))
+                            )
+                          ),
+                          fluidRow(
+                            column(6, textInput("sys3_chr_filter", "Chromosome Filter (e.g. 1, or blank)", value = "1")),
+                            column(6, numericInput("sys3_p_thresh", "Max P-Value Threshold", value = 1e-5, step = 1e-6))
+                          ),
+                          fluidRow(
+                            column(12, colourInput("sys3_col", "System 3 Point Color", value = "#2CA02C"))
+                          )
+                        )
+                      )
+               ),
+               
+               column(6,
+                      conditionalPanel(
+                        condition = "input.num_datasets >= 4",
+                        wellPanel(
+                          h4("System 4 Settings"),
+                          fluidRow(
+                            column(6, selectInput("sys4_chr_col", "Chromosome Column", choices = NULL)),
+                            column(6, selectInput("sys4_bp_col", "Position (BP) Column", choices = NULL))
+                          ),
+                          fluidRow(
+                            column(6, selectInput("sys4_p_col", "P-Value Column", choices = NULL)),
+                            column(6, selectInput("sys4_snp_col", "SNP ID Column", choices = NULL))
+                          ),
+                          checkboxInput("sys4_has_ref_alt", "Dataset includes REF and ALT columns", value = FALSE),
+                          conditionalPanel(
+                            condition = "input.sys4_has_ref_alt == true",
+                            fluidRow(
+                              column(6, selectInput("sys4_ref_col", "REF Allele Column", choices = NULL)),
+                              column(6, selectInput("sys4_alt_col", "ALT Allele Column", choices = NULL))
+                            )
+                          ),
+                          fluidRow(
+                            column(6, textInput("sys4_chr_filter", "Chromosome Filter (e.g. 1, or blank)", value = "1")),
+                            column(6, numericInput("sys4_p_thresh", "Max P-Value Threshold", value = 1e-5, step = 1e-6))
+                          ),
+                          fluidRow(
+                            column(12, colourInput("sys4_col", "System 4 Point Color", value = "#D62728"))
+                          )
                         )
                       )
                )
@@ -371,13 +446,13 @@ ui <- fluidPage(
                         fluidRow(
                           column(8,
                                  radioButtons("plot_mode", "Plot Display Mode:",
-                                              choices = c("Individual Plots" = "individual", "Overlay Both Datasets" = "overlay"),
+                                              choices = c("Individual Plots" = "individual", "Overlay All Datasets" = "overlay"),
                                               selected = "individual", inline = TRUE),
                                  
                                  conditionalPanel(
                                    condition = "input.plot_mode == 'individual'",
                                    radioButtons("individual_layout", "Individual Plot Layout:",
-                                                choices = c("Side-by-Side" = "side", "Top-to-Bottom" = "stacked"),
+                                                choices = c("Side-by-Side/Grid" = "side", "Top-to-Bottom Stacked" = "stacked"),
                                                 selected = "side", inline = TRUE)
                                  )
                           ),
@@ -404,18 +479,10 @@ ui <- fluidPage(
              
              # Region Data Preview Tables (< 50 points threshold)
              fluidRow(
-               column(6,
-                      wellPanel(
-                        h4("System 1 Region Preview"),
-                        uiOutput("sys1_preview_ui")
-                      )
-               ),
-               column(6,
-                      wellPanel(
-                        h4("System 2 Region Preview"),
-                        uiOutput("sys2_preview_ui")
-                      )
-               )
+               column(3, conditionalPanel(condition = "input.num_datasets >= 1", wellPanel(h4("Sys 1 Preview"), uiOutput("sys1_preview_ui")))),
+               column(3, conditionalPanel(condition = "input.num_datasets >= 2", wellPanel(h4("Sys 2 Preview"), uiOutput("sys2_preview_ui")))),
+               column(3, conditionalPanel(condition = "input.num_datasets >= 3", wellPanel(h4("Sys 3 Preview"), uiOutput("sys3_preview_ui")))),
+               column(3, conditionalPanel(condition = "input.num_datasets >= 4", wellPanel(h4("Sys 4 Preview"), uiOutput("sys4_preview_ui"))))
              ),
              
              hr(),
@@ -439,292 +506,267 @@ ui <- fluidPage(
     
     tabPanel("Navbar 3", 
              h3("Full Datasets"),
-             dataTableOutput("table1"),
-             dataTableOutput("table2"),
+             conditionalPanel(condition = "input.num_datasets >= 1", dataTableOutput("table1")),
+             conditionalPanel(condition = "input.num_datasets >= 2", dataTableOutput("table2")),
+             conditionalPanel(condition = "input.num_datasets >= 3", dataTableOutput("table3")),
+             conditionalPanel(condition = "input.num_datasets >= 4", dataTableOutput("table4")),
              
              hr(),
              
              h3("Region-Filtered Datasets"),
              downloadButton("download_tables", "Download tables", class = "btn-success"),
              br(), br(),
-             dataTableOutput("filtered_table1"),
-             dataTableOutput("filtered_table2")
+             conditionalPanel(condition = "input.num_datasets >= 1", dataTableOutput("filtered_table1")),
+             conditionalPanel(condition = "input.num_datasets >= 2", dataTableOutput("filtered_table2")),
+             conditionalPanel(condition = "input.num_datasets >= 3", dataTableOutput("filtered_table3")),
+             conditionalPanel(condition = "input.num_datasets >= 4", dataTableOutput("filtered_table4"))
     )
   )
 )
 
 # Server Logic
 server <- function(input, output, session) {
-  # Reactive counter to force plot axis resets
   reset_counter <- reactiveVal(0)
   
   # Reset Button Handler
   observeEvent(input$reset_plots, {
-    # 1. Clear clicked annotations
     clicked_point_sys1(NULL)
     clicked_point_sys2(NULL)
+    clicked_point_sys3(NULL)
+    clicked_point_sys4(NULL)
     clicked_point_overlay(NULL)
     
-    # 2. Increment counter (forces Plotly to auto-scale axes)
     reset_counter(reset_counter() + 1)
     
-    # 3. Clear annotations via proxy
     plotlyProxy("manhattanPlot1", session) %>% plotlyProxyInvoke("relayout", list(annotations = list()))
     plotlyProxy("manhattanPlot2", session) %>% plotlyProxyInvoke("relayout", list(annotations = list()))
+    plotlyProxy("manhattanPlot3", session) %>% plotlyProxyInvoke("relayout", list(annotations = list()))
+    plotlyProxy("manhattanPlot4", session) %>% plotlyProxyInvoke("relayout", list(annotations = list()))
     plotlyProxy("overlayPlot", session) %>% plotlyProxyInvoke("relayout", list(annotations = list()))
   })
-  # Store the last relayout state to prevent infinite zooming loops
-  last_relayout <- reactiveVal(NULL)
+  
+  last_synced_range <- reactiveVal(NULL)
   
   output$txtout <- renderText({
     paste(input$txt1, input$txt2, sep = " ")
   })
   
-  # --- SYSTEM 1 LOGIC ---
-  sys1_raw <- reactive({
-    req(input$sys1_file)
-    fread(input$sys1_file$datapath)
-  })
-  
+  # --- DATASET 1 LOGIC ---
+  sys1_raw <- reactive({ req(input$sys1_file); fread(input$sys1_file$datapath) })
   observeEvent(sys1_raw(), {
     cols <- names(sys1_raw())
-    
-    chr_default <- grep("chr|chrom", cols, ignore.case = TRUE, value = TRUE)[1]
-    bp_default  <- grep("pos|bp", cols, ignore.case = TRUE, value = TRUE)[1]
-    p_default   <- grep("^p$|p_val|p.val|pval", cols, ignore.case = TRUE, value = TRUE)[1]
-    snp_default <- grep("snp|id|rs", cols, ignore.case = TRUE, value = TRUE)[1]
-    ref_default <- grep("^ref$|reference|a1|allele1", cols, ignore.case = TRUE, value = TRUE)[1]
-    alt_default <- grep("^alt$|alternate|a2|allele2", cols, ignore.case = TRUE, value = TRUE)[1]
-    
-    updateSelectInput(session, "sys1_chr_col", choices = cols, selected = ifelse(is.na(chr_default), cols[1], chr_default))
-    updateSelectInput(session, "sys1_bp_col", choices = cols, selected = ifelse(is.na(bp_default), cols[1], bp_default))
-    updateSelectInput(session, "sys1_p_col", choices = cols, selected = ifelse(is.na(p_default), cols[1], p_default))
-    updateSelectInput(session, "sys1_snp_col", choices = cols, selected = ifelse(is.na(snp_default), cols[1], snp_default))
-    updateSelectInput(session, "sys1_ref_col", choices = cols, selected = ifelse(is.na(ref_default), cols[1], ref_default))
-    updateSelectInput(session, "sys1_alt_col", choices = cols, selected = ifelse(is.na(alt_default), cols[1], alt_default))
+    updateSelectInput(session, "sys1_chr_col", choices = cols, selected = grep("chr|chrom", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys1_bp_col", choices = cols, selected = grep("pos|bp", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys1_p_col", choices = cols, selected = grep("^p$|p_val|p.val|pval", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys1_snp_col", choices = cols, selected = grep("snp|id|rs", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys1_ref_col", choices = cols, selected = grep("^ref$|reference|a1|allele1", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys1_alt_col", choices = cols, selected = grep("^alt$|alternate|a2|allele2", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
   })
   
   inp1 <- reactive({
     req(sys1_raw(), input$sys1_chr_col, input$sys1_p_col, input$sys1_bp_col)
-    
     df <- copy(sys1_raw())
-    chr_col <- input$sys1_chr_col
-    bp_col  <- input$sys1_bp_col
-    p_col   <- input$sys1_p_col
-    
     target_chrs <- parse_chr_input(input$sys1_chr_filter)
-    if (!is.null(target_chrs)) {
-      df <- df[as.character(get(chr_col)) %in% target_chrs]
-    }
-    
-    if (!is.null(input$sys1_p_thresh) && !is.na(input$sys1_p_thresh)) {
-      df <- df[get(p_col) < as.numeric(input$sys1_p_thresh)]
-    }
+    if (!is.null(target_chrs)) df <- df[as.character(get(input$sys1_chr_col)) %in% target_chrs]
+    if (!is.null(input$sys1_p_thresh) && !is.na(input$sys1_p_thresh)) df <- df[get(input$sys1_p_col) < as.numeric(input$sys1_p_thresh)]
     
     if (isTRUE(input$sys1_has_ref_alt) && !is.null(input$sys1_ref_col) && !is.null(input$sys1_alt_col)) {
-      ref_c <- input$sys1_ref_col
-      alt_c <- input$sys1_alt_col
-      
-      df[, gnomad_var_id := paste(
-        toupper(gsub("^chr", "", get(chr_col), ignore.case = TRUE)),
-        get(bp_col),
-        toupper(get(ref_c)),
-        toupper(get(alt_c)),
-        sep = "-"
-      )]
+      df[, gnomad_var_id := paste(toupper(gsub("^chr", "", get(input$sys1_chr_col), ignore.case = TRUE)), get(input$sys1_bp_col), toupper(get(input$sys1_ref_col)), toupper(get(input$sys1_alt_col)), sep = "-")]
     } else {
       snp_c <- input$sys1_snp_col
-      if (!is.null(snp_c) && snp_c %in% names(df)) {
-        df[, gnomad_var_id := as.character(get(snp_c))]
-      } else {
-        df[, gnomad_var_id := paste(
-          toupper(gsub("^chr", "", get(chr_col), ignore.case = TRUE)),
-          get(bp_col), 
-          sep = "-"
-        )]
-      }
+      if (!is.null(snp_c) && snp_c %in% names(df)) df[, gnomad_var_id := as.character(get(snp_c))]
+      else df[, gnomad_var_id := paste(toupper(gsub("^chr", "", get(input$sys1_chr_col), ignore.case = TRUE)), get(input$sys1_bp_col), sep = "-")]
     }
-    
     df
   })
   
-  # --- SYSTEM 2 LOGIC ---
-  sys2_raw <- reactive({
-    req(input$sys2_file)
-    fread(input$sys2_file$datapath)
-  })
-  
+  # --- DATASET 2 LOGIC ---
+  sys2_raw <- reactive({ req(input$sys2_file); fread(input$sys2_file$datapath) })
   observeEvent(sys2_raw(), {
     cols <- names(sys2_raw())
-    
-    chr_default <- grep("chr|chrom", cols, ignore.case = TRUE, value = TRUE)[1]
-    bp_default  <- grep("pos|bp", cols, ignore.case = TRUE, value = TRUE)[1]
-    p_default   <- grep("^p$|p_val|p.val|pval", cols, ignore.case = TRUE, value = TRUE)[1]
-    snp_default <- grep("snp|id|rs", cols, ignore.case = TRUE, value = TRUE)[1]
-    ref_default <- grep("^ref$|reference|a1|allele1", cols, ignore.case = TRUE, value = TRUE)[1]
-    alt_default <- grep("^alt$|alternate|a2|allele2", cols, ignore.case = TRUE, value = TRUE)[1]
-    
-    updateSelectInput(session, "sys2_chr_col", choices = cols, selected = ifelse(is.na(chr_default), cols[1], chr_default))
-    updateSelectInput(session, "sys2_bp_col", choices = cols, selected = ifelse(is.na(bp_default), cols[1], bp_default))
-    updateSelectInput(session, "sys2_p_col", choices = cols, selected = ifelse(is.na(p_default), cols[1], p_default))
-    updateSelectInput(session, "sys2_snp_col", choices = cols, selected = ifelse(is.na(snp_default), cols[1], snp_default))
-    updateSelectInput(session, "sys2_ref_col", choices = cols, selected = ifelse(is.na(ref_default), cols[1], ref_default))
-    updateSelectInput(session, "sys2_alt_col", choices = cols, selected = ifelse(is.na(alt_default), cols[1], alt_default))
+    updateSelectInput(session, "sys2_chr_col", choices = cols, selected = grep("chr|chrom", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys2_bp_col", choices = cols, selected = grep("pos|bp", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys2_p_col", choices = cols, selected = grep("^p$|p_val|p.val|pval", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys2_snp_col", choices = cols, selected = grep("snp|id|rs", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys2_ref_col", choices = cols, selected = grep("^ref$|reference|a1|allele1", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys2_alt_col", choices = cols, selected = grep("^alt$|alternate|a2|allele2", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
   })
   
   inp2 <- reactive({
     req(sys2_raw(), input$sys2_chr_col, input$sys2_p_col, input$sys2_bp_col)
-    
     df <- copy(sys2_raw())
-    chr_col <- input$sys2_chr_col
-    bp_col  <- input$sys2_bp_col
-    p_col   <- input$sys2_p_col
-    
     target_chrs <- parse_chr_input(input$sys2_chr_filter)
-    if (!is.null(target_chrs)) {
-      df <- df[as.character(get(chr_col)) %in% target_chrs]
-    }
-    
-    if (!is.null(input$sys2_p_thresh) && !is.na(input$sys2_p_thresh)) {
-      df <- df[get(p_col) < as.numeric(input$sys2_p_thresh)]
-    }
+    if (!is.null(target_chrs)) df <- df[as.character(get(input$sys2_chr_col)) %in% target_chrs]
+    if (!is.null(input$sys2_p_thresh) && !is.na(input$sys2_p_thresh)) df <- df[get(input$sys2_p_col) < as.numeric(input$sys2_p_thresh)]
     
     if (isTRUE(input$sys2_has_ref_alt) && !is.null(input$sys2_ref_col) && !is.null(input$sys2_alt_col)) {
-      ref_c <- input$sys2_ref_col
-      alt_c <- input$sys2_alt_col
-      
-      df[, gnomad_var_id := paste(
-        toupper(gsub("^chr", "", get(chr_col), ignore.case = TRUE)),
-        get(bp_col),
-        toupper(get(ref_c)),
-        toupper(get(alt_c)),
-        sep = "-"
-      )]
+      df[, gnomad_var_id := paste(toupper(gsub("^chr", "", get(input$sys2_chr_col), ignore.case = TRUE)), get(input$sys2_bp_col), toupper(get(input$sys2_ref_col)), toupper(get(input$sys2_alt_col)), sep = "-")]
     } else {
       snp_c <- input$sys2_snp_col
-      if (!is.null(snp_c) && snp_c %in% names(df)) {
-        df[, gnomad_var_id := as.character(get(snp_c))]
-      } else {
-        df[, gnomad_var_id := paste(
-          toupper(gsub("^chr", "", get(chr_col), ignore.case = TRUE)),
-          get(bp_col), 
-          sep = "-"
-        )]
-      }
+      if (!is.null(snp_c) && snp_c %in% names(df)) df[, gnomad_var_id := as.character(get(snp_c))]
+      else df[, gnomad_var_id := paste(toupper(gsub("^chr", "", get(input$sys2_chr_col), ignore.case = TRUE)), get(input$sys2_bp_col), sep = "-")]
     }
-    
     df
   })
   
+  # --- DATASET 3 LOGIC ---
+  sys3_raw <- reactive({ req(input$sys3_file); fread(input$sys3_file$datapath) })
+  observeEvent(sys3_raw(), {
+    cols <- names(sys3_raw())
+    updateSelectInput(session, "sys3_chr_col", choices = cols, selected = grep("chr|chrom", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys3_bp_col", choices = cols, selected = grep("pos|bp", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys3_p_col", choices = cols, selected = grep("^p$|p_val|p.val|pval", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys3_snp_col", choices = cols, selected = grep("snp|id|rs", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys3_ref_col", choices = cols, selected = grep("^ref$|reference|a1|allele1", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys3_alt_col", choices = cols, selected = grep("^alt$|alternate|a2|allele2", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+  })
+  
+  inp3 <- reactive({
+    req(sys3_raw(), input$sys3_chr_col, input$sys3_p_col, input$sys3_bp_col)
+    df <- copy(sys3_raw())
+    target_chrs <- parse_chr_input(input$sys3_chr_filter)
+    if (!is.null(target_chrs)) df <- df[as.character(get(input$sys3_chr_col)) %in% target_chrs]
+    if (!is.null(input$sys3_p_thresh) && !is.na(input$sys3_p_thresh)) df <- df[get(input$sys3_p_col) < as.numeric(input$sys3_p_thresh)]
+    
+    if (isTRUE(input$sys3_has_ref_alt) && !is.null(input$sys3_ref_col) && !is.null(input$sys3_alt_col)) {
+      df[, gnomad_var_id := paste(toupper(gsub("^chr", "", get(input$sys3_chr_col), ignore.case = TRUE)), get(input$sys3_bp_col), toupper(get(input$sys3_ref_col)), toupper(get(input$sys3_alt_col)), sep = "-")]
+    } else {
+      snp_c <- input$sys3_snp_col
+      if (!is.null(snp_c) && snp_c %in% names(df)) df[, gnomad_var_id := as.character(get(snp_c))]
+      else df[, gnomad_var_id := paste(toupper(gsub("^chr", "", get(input$sys3_chr_col), ignore.case = TRUE)), get(input$sys3_bp_col), sep = "-")]
+    }
+    df
+  })
+  
+  # --- DATASET 4 LOGIC ---
+  sys4_raw <- reactive({ req(input$sys4_file); fread(input$sys4_file$datapath) })
+  observeEvent(sys4_raw(), {
+    cols <- names(sys4_raw())
+    updateSelectInput(session, "sys4_chr_col", choices = cols, selected = grep("chr|chrom", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys4_bp_col", choices = cols, selected = grep("pos|bp", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys4_p_col", choices = cols, selected = grep("^p$|p_val|p.val|pval", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys4_snp_col", choices = cols, selected = grep("snp|id|rs", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys4_ref_col", choices = cols, selected = grep("^ref$|reference|a1|allele1", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+    updateSelectInput(session, "sys4_alt_col", choices = cols, selected = grep("^alt$|alternate|a2|allele2", cols, ignore.case = TRUE, value = TRUE)[1] %||% cols[1])
+  })
+  
+  inp4 <- reactive({
+    req(sys4_raw(), input$sys4_chr_col, input$sys4_p_col, input$sys4_bp_col)
+    df <- copy(sys4_raw())
+    target_chrs <- parse_chr_input(input$sys4_chr_filter)
+    if (!is.null(target_chrs)) df <- df[as.character(get(input$sys4_chr_col)) %in% target_chrs]
+    if (!is.null(input$sys4_p_thresh) && !is.na(input$sys4_p_thresh)) df <- df[get(input$sys4_p_col) < as.numeric(input$sys4_p_thresh)]
+    
+    if (isTRUE(input$sys4_has_ref_alt) && !is.null(input$sys4_ref_col) && !is.null(input$sys4_alt_col)) {
+      df[, gnomad_var_id := paste(toupper(gsub("^chr", "", get(input$sys4_chr_col), ignore.case = TRUE)), get(input$sys4_bp_col), toupper(get(input$sys4_ref_col)), toupper(get(input$sys4_alt_col)), sep = "-")]
+    } else {
+      snp_c <- input$sys4_snp_col
+      if (!is.null(snp_c) && snp_c %in% names(df)) df[, gnomad_var_id := as.character(get(snp_c))]
+      else df[, gnomad_var_id := paste(toupper(gsub("^chr", "", get(input$sys4_chr_col), ignore.case = TRUE)), get(input$sys4_bp_col), sep = "-")]
+    }
+    df
+  })
+  
+  # --- DYNAMIC PLOT CONTAINER ---
   output$plot_container <- renderUI({
+    n <- input$num_datasets
     if (input$plot_mode == "individual") {
       if (input$individual_layout == "side") {
-        fluidRow(
-          column(6, plotlyOutput("manhattanPlot1", height = "600px")),
-          column(6, plotlyOutput("manhattanPlot2", height = "600px"))
-        )
+        if (n == 1) {
+          fluidRow(column(12, plotlyOutput("manhattanPlot1", height = "600px")))
+        } else if (n == 2) {
+          fluidRow(column(6, plotlyOutput("manhattanPlot1", height = "600px")), column(6, plotlyOutput("manhattanPlot2", height = "600px")))
+        } else if (n == 3) {
+          fluidRow(column(4, plotlyOutput("manhattanPlot1", height = "600px")), column(4, plotlyOutput("manhattanPlot2", height = "600px")), column(4, plotlyOutput("manhattanPlot3", height = "600px")))
+        } else {
+          fluidRow(
+            column(6, plotlyOutput("manhattanPlot1", height = "500px")), column(6, plotlyOutput("manhattanPlot2", height = "500px")),
+            column(6, plotlyOutput("manhattanPlot3", height = "500px")), column(6, plotlyOutput("manhattanPlot4", height = "500px"))
+          )
+        }
       } else {
-        fluidRow(
-          column(12, plotlyOutput("manhattanPlot1", height = "500px")),
-          column(12, br()),
-          column(12, plotlyOutput("manhattanPlot2", height = "500px"))
-        )
+        # Stacked layout
+        res <- list()
+        for (i in seq_len(n)) {
+          res[[length(res) + 1]] <- column(12, plotlyOutput(paste0("manhattanPlot", i), height = "500px"))
+          if (i < n) res[[length(res) + 1]] <- column(12, br())
+        }
+        do.call(fluidRow, res)
       }
     } else {
-      fluidRow(
-        column(12, plotlyOutput("overlayPlot", height = "650px"))
-      )
+      fluidRow(column(12, plotlyOutput("overlayPlot", height = "650px")))
     }
   })
   
+  # Render individual manhattan plots
   output$manhattanPlot1 <- renderPlotly({
     req(inp1(), input$sys1_chr_col, input$sys1_bp_col, input$sys1_p_col)
-    
-    p1 <- manhattanly(
-      inp1(),
-      chr = input$sys1_chr_col,
-      bp = input$sys1_bp_col,
-      p = input$sys1_p_col,
-      snp = "gnomad_var_id",
-      annotation1 = "gnomad_var_id",
-      annotation2 = input$sys1_bp_col,
-      col = c(input$sys1_col, input$sys1_col)
-    )
+    p1 <- manhattanly(inp1(), chr = input$sys1_chr_col, bp = input$sys1_bp_col, p = input$sys1_p_col, snp = "gnomad_var_id", annotation1 = "gnomad_var_id", annotation2 = input$sys1_bp_col, col = c(input$sys1_col, input$sys1_col))
     p1$x$source <- "manhattanPlot1"
     layout(p1, uirevision = reset_counter())
   })
   
   output$manhattanPlot2 <- renderPlotly({
-    req(inp2(), input$sys2_chr_col, input$sys2_bp_col, input$sys2_p_col)
-    
-    p2 <- manhattanly(
-      inp2(),
-      chr = input$sys2_chr_col,
-      bp = input$sys2_bp_col,
-      p = input$sys2_p_col,
-      snp = "gnomad_var_id",
-      annotation1 = "gnomad_var_id",
-      annotation2 = input$sys2_bp_col,
-      col = c(input$sys2_col, input$sys2_col)
-    )
+    req(input$num_datasets >= 2, inp2(), input$sys2_chr_col, input$sys2_bp_col, input$sys2_p_col)
+    p2 <- manhattanly(inp2(), chr = input$sys2_chr_col, bp = input$sys2_bp_col, p = input$sys2_p_col, snp = "gnomad_var_id", annotation1 = "gnomad_var_id", annotation2 = input$sys2_bp_col, col = c(input$sys2_col, input$sys2_col))
     p2$x$source <- "manhattanPlot2"
     layout(p2, uirevision = reset_counter())
   })
   
-  output$overlayPlot <- renderPlotly({     req(inp1(), inp2(), input$sys1_chr_col, input$sys1_bp_col, input$sys1_p_col)
-    req(input$sys2_chr_col, input$sys2_bp_col, input$sys2_p_col)
+  output$manhattanPlot3 <- renderPlotly({
+    req(input$num_datasets >= 3, inp3(), input$sys3_chr_col, input$sys3_bp_col, input$sys3_p_col)
+    p3 <- manhattanly(inp3(), chr = input$sys3_chr_col, bp = input$sys3_bp_col, p = input$sys3_p_col, snp = "gnomad_var_id", annotation1 = "gnomad_var_id", annotation2 = input$sys3_bp_col, col = c(input$sys3_col, input$sys3_col))
+    p3$x$source <- "manhattanPlot3"
+    layout(p3, uirevision = reset_counter())
+  })
+  
+  output$manhattanPlot4 <- renderPlotly({
+    req(input$num_datasets >= 4, inp4(), input$sys4_chr_col, input$sys4_bp_col, input$sys4_p_col)
+    p4 <- manhattanly(inp4(), chr = input$sys4_chr_col, bp = input$sys4_bp_col, p = input$sys4_p_col, snp = "gnomad_var_id", annotation1 = "gnomad_var_id", annotation2 = input$sys4_bp_col, col = c(input$sys4_col, input$sys4_col))
+    p4$x$source <- "manhattanPlot4"
+    layout(p4, uirevision = reset_counter())
+  })
+  
+  # Overlay Plot with up to 4 datasets
+  output$overlayPlot <- renderPlotly({
+    n <- input$num_datasets
+    req(inp1(), input$sys1_chr_col, input$sys1_bp_col, input$sys1_p_col)
+    if (n >= 2) req(inp2(), input$sys2_chr_col, input$sys2_bp_col, input$sys2_p_col)
+    if (n >= 3) req(inp3(), input$sys3_chr_col, input$sys3_bp_col, input$sys3_p_col)
+    if (n >= 4) req(inp4(), input$sys4_chr_col, input$sys4_bp_col, input$sys4_p_col)
     
+    p_overlay <- plot_ly()
+    
+    # Dataset 1 trace
     d1 <- copy(inp1())
-    d1[, `:=`(
-      CHR_plot = as.character(get(input$sys1_chr_col)),
-      BP_plot  = as.numeric(get(input$sys1_bp_col)),
-      P_plot   = -log10(as.numeric(get(input$sys1_p_col))),
-      SNP_plot = as.character(gnomad_var_id)
-    )]
+    d1[, `:=`(CHR_plot = as.character(get(input$sys1_chr_col)), BP_plot = as.numeric(get(input$sys1_bp_col)), P_plot = -log10(as.numeric(get(input$sys1_p_col))), SNP_plot = as.character(gnomad_var_id))]
+    p_overlay <- p_overlay %>% add_trace(data = d1, x = ~BP_plot, y = ~P_plot, type = 'scatter', mode = 'markers', name = 'System 1', key = ~SNP_plot, marker = list(color = input$sys1_col, size = 6, opacity = 0.7), customdata = ~SNP_plot, text = ~paste("SNP:", SNP_plot, "<br>CHR:", CHR_plot, "<br>BP:", BP_plot, "<br>-log10(P):", round(P_plot, 3)), hoverinfo = "text")
     
-    d2 <- copy(inp2())
-    d2[, `:=`(
-      CHR_plot = as.character(get(input$sys2_chr_col)),
-      BP_plot  = as.numeric(get(input$sys2_bp_col)),
-      P_plot   = -log10(as.numeric(get(input$sys2_p_col))),
-      SNP_plot = as.character(gnomad_var_id)
-    )]
+    if (n >= 2) {
+      d2 <- copy(inp2())
+      d2[, `:=`(CHR_plot = as.character(get(input$sys2_chr_col)), BP_plot = as.numeric(get(input$sys2_bp_col)), P_plot = -log10(as.numeric(get(input$sys2_p_col))), SNP_plot = as.character(gnomad_var_id))]
+      p_overlay <- p_overlay %>% add_trace(data = d2, x = ~BP_plot, y = ~P_plot, type = 'scatter', mode = 'markers', name = 'System 2', key = ~SNP_plot, marker = list(color = input$sys2_col, size = 6, opacity = 0.7), customdata = ~SNP_plot, text = ~paste("SNP:", SNP_plot, "<br>CHR:", CHR_plot, "<br>BP:", BP_plot, "<br>-log10(P):", round(P_plot, 3)), hoverinfo = "text")
+    }
     
-    p_overlay <- plot_ly() %>%
-      add_trace(
-        data = d1,
-        x = ~BP_plot,
-        y = ~P_plot,
-        type = 'scatter',
-        mode = 'markers',
-        name = 'System 1',
-        key = ~SNP_plot,         # <--- ADD THIS
-        marker = list(color = input$sys1_col, size = 6, opacity = 0.7),
-        customdata = ~SNP_plot,
-        text = ~paste("SNP:", SNP_plot, "<br>CHR:", CHR_plot, "<br>BP:", BP_plot, "<br>-log10(P):", round(P_plot, 3)),
-        hoverinfo = "text"
-      ) %>%
-      add_trace(
-        data = d2,
-        x = ~BP_plot,
-        y = ~P_plot,
-        type = 'scatter',
-        mode = 'markers',
-        name = 'System 2',
-        key = ~SNP_plot,         # <--- ADD THIS
-        marker = list(color = input$sys2_col, size = 6, opacity = 0.7),
-        customdata = ~SNP_plot,
-        text = ~paste("SNP:", SNP_plot, "<br>CHR:", CHR_plot, "<br>BP:", BP_plot, "<br>-log10(P):", round(P_plot, 3)),
-        hoverinfo = "text"
-      ) %>%
-      layout(
-        title = "Overlay Manhattan Plot",
-        xaxis = list(title = "Base Pair Position (BP)"),
-        yaxis = list(title = "-log10(p-value)"),
-        legend = list(title = list(text = '<b>Dataset</b>')),
-        uirevision = reset_counter()
-      )
+    if (n >= 3) {
+      d3 <- copy(inp3())
+      d3[, `:=`(CHR_plot = as.character(get(input$sys3_chr_col)), BP_plot = as.numeric(get(input$sys3_bp_col)), P_plot = -log10(as.numeric(get(input$sys3_p_col))), SNP_plot = as.character(gnomad_var_id))]
+      p_overlay <- p_overlay %>% add_trace(data = d3, x = ~BP_plot, y = ~P_plot, type = 'scatter', mode = 'markers', name = 'System 3', key = ~SNP_plot, marker = list(color = input$sys3_col, size = 6, opacity = 0.7), customdata = ~SNP_plot, text = ~paste("SNP:", SNP_plot, "<br>CHR:", CHR_plot, "<br>BP:", BP_plot, "<br>-log10(P):", round(P_plot, 3)), hoverinfo = "text")
+    }
     
+    if (n >= 4) {
+      d4 <- copy(inp4())
+      d4[, `:=`(CHR_plot = as.character(get(input$sys4_chr_col)), BP_plot = as.numeric(get(input$sys4_bp_col)), P_plot = -log10(as.numeric(get(input$sys4_p_col))), SNP_plot = as.character(gnomad_var_id))]
+      p_overlay <- p_overlay %>% add_trace(data = d4, x = ~BP_plot, y = ~P_plot, type = 'scatter', mode = 'markers', name = 'System 4', key = ~SNP_plot, marker = list(color = input$sys4_col, size = 6, opacity = 0.7), customdata = ~SNP_plot, text = ~paste("SNP:", SNP_plot, "<br>CHR:", CHR_plot, "<br>BP:", BP_plot, "<br>-log10(P):", round(P_plot, 3)), hoverinfo = "text")
+    }
+    
+    p_overlay <- p_overlay %>% layout(
+      title = "Overlay Manhattan Plot",
+      xaxis = list(title = "Base Pair Position (BP)"),
+      yaxis = list(title = "-log10(p-value)"),
+      legend = list(title = list(text = '<b>Dataset</b>')),
+      uirevision = reset_counter()
+    )
     p_overlay$x$source <- "overlayPlot"
     p_overlay
   })
@@ -737,16 +779,9 @@ server <- function(input, output, session) {
     target_url <- build_gnomad_url(query_trimmed, input$gnomad_build)
     if (is.null(target_url)) return(NULL)
     
-    tags$a(
-      href = target_url,
-      target = "_blank",
-      class = "btn btn-primary",
-      icon("external-link-alt"),
-      paste("Open", query_trimmed, "in gnoMAD")
-    )
+    tags$a(href = target_url, target = "_blank", class = "btn btn-primary", icon("external-link-alt"), paste("Open", query_trimmed, "in gnoMAD"))
   })
   
-  # Helper to extract numeric X-axis range from relayout events
   extract_x_range <- function(relayout_data) {
     if (is.null(relayout_data)) return(NULL)
     x0 <- relayout_data[["xaxis.range[0]"]]
@@ -756,319 +791,173 @@ server <- function(input, output, session) {
     return(NULL)
   }
   
-  last_synced_range <- reactiveVal(NULL)
-  
-  # Synchronize Zoom/Pan with Echo Suppression
-  observeEvent(event_data("plotly_relayout", source = "manhattanPlot1"), {
-    relayout_data <- event_data("plotly_relayout", source = "manhattanPlot1")
-    req(relayout_data)
-    
-    rng <- extract_x_range(relayout_data)
-    last_rng <- last_synced_range()
-    
-    # Ignore echo if the numerical range is already identical
-    if (!is.null(rng) && !is.null(last_rng)) {
-      if (isTRUE(all.equal(rng, last_rng, tolerance = 1e-4))) return()
-    }
-    
-    if (!is.null(rng)) last_synced_range(rng)
-    
-    plotlyProxy("manhattanPlot2", session) %>%
-      plotlyProxyInvoke("relayout", relayout_data)
-  }, ignoreInit = TRUE)
-  
-  observeEvent(event_data("plotly_relayout", source = "manhattanPlot2"), {
-    relayout_data <- event_data("plotly_relayout", source = "manhattanPlot2")
-    req(relayout_data)
-    
-    rng <- extract_x_range(relayout_data)
-    last_rng <- last_synced_range()
-    
-    # Ignore echo if the numerical range is already identical
-    if (!is.null(rng) && !is.null(last_rng)) {
-      if (isTRUE(all.equal(rng, last_rng, tolerance = 1e-4))) return()
-    }
-    
-    if (!is.null(rng)) last_synced_range(rng)
-    
-    plotlyProxy("manhattanPlot1", session) %>%
-      plotlyProxyInvoke("relayout", relayout_data)
-  }, ignoreInit = TRUE)
-  
-  # Click Observers
-  observeEvent(event_data("plotly_click", source = "manhattanPlot1"), {
-    click_data <- event_data("plotly_click", source = "manhattanPlot1")
-    if (!is.null(click_data)) {
-      current <- clicked_point_sys1()
+  # Zoom synchronization across individual plots
+  lapply(1:4, function(i) {
+    observeEvent(event_data("plotly_relayout", source = paste0("manhattanPlot", i)), {
+      relayout_data <- event_data("plotly_relayout", source = paste0("manhattanPlot", i))
+      req(relayout_data)
+      rng <- extract_x_range(relayout_data)
+      last_rng <- last_synced_range()
+      if (!is.null(rng) && !is.null(last_rng) && isTRUE(all.equal(rng, last_rng, tolerance = 1e-4))) return()
+      if (!is.null(rng)) last_synced_range(rng)
       
-      if (!is.null(current) && identical(current$x, click_data$x) && identical(current$y, click_data$y)) {
-        clicked_point_sys1(NULL)
-        plotlyProxy("manhattanPlot1", session) %>%
-          plotlyProxyInvoke("relayout", list(annotations = list()))
-      } else {
-        raw_val <- click_data$key
-        if (is.null(raw_val)) raw_val <- click_data$customdata
-        if (is.null(raw_val)) raw_val <- click_data$text
-        chr_fb  <- parse_chr_input(input$sys1_chr_filter)[1]
-        bp_fb   <- click_data$x
-        
-        snp_id <- clean_variant_id(raw_val, chr_fallback = chr_fb, bp_fallback = bp_fb)
-        if (is.null(snp_id) || !nzchar(snp_id)) {
-          snp_id <- paste(ifelse(is.null(chr_fb), "1", chr_fb), bp_fb, sep = "-")
+      for (j in 1:input$num_datasets) {
+        if (i != j) {
+          plotlyProxy(paste0("manhattanPlot", j), session) %>% plotlyProxyInvoke("relayout", relayout_data)
         }
-        
-        af_val <- fetch_gnomad_af(snp_id, input$gnomad_build)
-        
-        hover_txt <- paste0(
-          "<b>SNP/Variant:</b> ", snp_id, "<br>",
-          "<b>BP:</b> ", click_data$x, "<br>",
-          "<b>-log10(P):</b> ", round(click_data$y, 3), "<br>",
-          "<b>gnoMAD AF:</b> ", af_val
-        )
-        
-        annotation <- list(
-          x = click_data$x,
-          y = click_data$y,
-          text = hover_txt,
-          showarrow = FALSE,
-          xanchor = "left",
-          yanchor = "bottom",
-          bgcolor = "rgba(255, 255, 255, 0.95)",
-          bordercolor = "#444444",
-          borderpad = 6,
-          font = list(size = 12, color = "#000000")
-        )
-        clicked_point_sys1(annotation)
-        plotlyProxy("manhattanPlot1", session) %>%
-          plotlyProxyInvoke("relayout", list(annotations = list(annotation)))
       }
-    }
+    }, ignoreInit = TRUE)
   })
   
-  observeEvent(event_data("plotly_click", source = "manhattanPlot2"), {
-    click_data <- event_data("plotly_click", source = "manhattanPlot2")
-    if (!is.null(click_data)) {
-      current <- clicked_point_sys2()
-      
-      if (!is.null(current) && identical(current$x, click_data$x) && identical(current$y, click_data$y)) {
-        clicked_point_sys2(NULL)
-        plotlyProxy("manhattanPlot2", session) %>%
-          plotlyProxyInvoke("relayout", list(annotations = list()))
-      } else {
-        raw_val <- click_data$key
-        if (is.null(raw_val)) raw_val <- click_data$customdata
-        if (is.null(raw_val)) raw_val <- click_data$text
-        chr_fb  <- parse_chr_input(input$sys2_chr_filter)[1]
-        bp_fb   <- click_data$x
-        
-        snp_id <- clean_variant_id(raw_val, chr_fallback = chr_fb, bp_fallback = bp_fb)
-        if (is.null(snp_id) || !nzchar(snp_id)) {
-          snp_id <- paste(ifelse(is.null(chr_fb), "1", chr_fb), bp_fb, sep = "-")
+  # Click observers generator for systems 1-4
+  local({
+    gen_click_observer <- function(sys_id) {
+      observeEvent(event_data("plotly_click", source = paste0("manhattanPlot", sys_id)), {
+        click_data <- event_data("plotly_click", source = paste0("manhattanPlot", sys_id))
+        if (!is.null(click_data)) {
+          reactive_val_getter <- get(paste0("clicked_point_sys", sys_id))
+          reactive_val_setter <- get(paste0("clicked_point_sys", sys_id))
+          current <- reactive_val_getter()
+          
+          if (!is.null(current) && identical(current$x, click_data$x) && identical(current$y, click_data$y)) {
+            reactive_val_setter(NULL)
+            plotlyProxy(paste0("manhattanPlot", sys_id), session) %>% plotlyProxyInvoke("relayout", list(annotations = list()))
+          } else {
+            raw_val <- click_data$key
+            if (is.null(raw_val)) raw_val <- click_data$customdata
+            if (is.null(raw_val)) raw_val <- click_data$text
+            chr_fb  <- parse_chr_input(input[[paste0("sys", sys_id, "_chr_filter")]])[1]
+            bp_fb   <- click_data$x
+            
+            snp_id <- clean_variant_id(raw_val, chr_fallback = chr_fb, bp_fallback = bp_fb)
+            if (is.null(snp_id) || !nzchar(snp_id)) snp_id <- paste(ifelse(is.null(chr_fb), "1", chr_fb), bp_fb, sep = "-")
+            
+            af_val <- fetch_gnomad_af(snp_id, input$gnomad_build)
+            hover_txt <- paste0("<b>SNP/Variant:</b> ", snp_id, "<br><b>BP:</b> ", click_data$x, "<br><b>-log10(P):</b> ", round(click_data$y, 3), "<br><b>gnoMAD AF:</b> ", af_val)
+            
+            annotation <- list(x = click_data$x, y = click_data$y, text = hover_txt, showarrow = FALSE, xanchor = "left", yanchor = "bottom", bgcolor = "rgba(255, 255, 255, 0.95)", bordercolor = "#444444", borderpad = 6, font = list(size = 12, color = "#000000"))
+            reactive_val_setter(annotation)
+            plotlyProxy(paste0("manhattanPlot", sys_id), session) %>% plotlyProxyInvoke("relayout", list(annotations = list(annotation)))
+          }
         }
-        
-        af_val <- fetch_gnomad_af(snp_id, input$gnomad_build)
-        
-        hover_txt <- paste0(
-          "<b>SNP/Variant:</b> ", snp_id, "<br>",
-          "<b>BP:</b> ", click_data$x, "<br>",
-          "<b>-log10(P):</b> ", round(click_data$y, 3), "<br>",
-          "<b>gnoMAD AF:</b> ", af_val
-        )
-        
-        annotation <- list(
-          x = click_data$x,
-          y = click_data$y,
-          text = hover_txt,
-          showarrow = FALSE,
-          xanchor = "left",
-          yanchor = "bottom",
-          bgcolor = "rgba(255, 255, 255, 0.95)",
-          bordercolor = "#444444",
-          borderpad = 6,
-          font = list(size = 12, color = "#000000")
-        )
-        clicked_point_sys2(annotation)
-        plotlyProxy("manhattanPlot2", session) %>%
-          plotlyProxyInvoke("relayout", list(annotations = list(annotation)))
-      }
+      })
     }
+    for (i in 1:4) gen_click_observer(i)
   })
   
   observeEvent(event_data("plotly_click", source = "overlayPlot"), {
     click_data <- event_data("plotly_click", source = "overlayPlot")
     if (!is.null(click_data)) {
       current <- clicked_point_overlay()
-      
       if (!is.null(current) && identical(current$x, click_data$x) && identical(current$y, click_data$y)) {
         clicked_point_overlay(NULL)
-        plotlyProxy("overlayPlot", session) %>%
-          plotlyProxyInvoke("relayout", list(annotations = list()))
+        plotlyProxy("overlayPlot", session) %>% plotlyProxyInvoke("relayout", list(annotations = list()))
       } else {
         raw_val <- click_data$key
         if (is.null(raw_val)) raw_val <- click_data$customdata
-        
-        # Safely extract CHR from hover text if present
         txt_content <- click_data$text
         chr_extracted <- NULL
         if (!is.null(txt_content)) {
           m_chr <- regmatches(txt_content, regexec("CHR:\\s*([0-9A-Za-z]+)", txt_content))[[1]]
           if (length(m_chr) >= 2) chr_extracted <- m_chr[2]
         }
-        
-        if (is.null(chr_extracted)) {
-          chr_extracted <- parse_chr_input(input$sys1_chr_filter)[1]
-        }
-        
+        if (is.null(chr_extracted)) chr_extracted <- parse_chr_input(input$sys1_chr_filter)[1]
         bp_fb <- click_data$x
         
         snp_id <- clean_variant_id(raw_val, chr_fallback = chr_extracted, bp_fallback = bp_fb)
-        if (is.null(snp_id) || !nzchar(snp_id)) {
-          snp_id <- paste(ifelse(is.null(chr_extracted), "1", chr_extracted), bp_fb, sep = "-")
-        }
+        if (is.null(snp_id) || !nzchar(snp_id)) snp_id <- paste(ifelse(is.null(chr_extracted), "1", chr_extracted), bp_fb, sep = "-")
         
         af_val <- fetch_gnomad_af(snp_id, input$gnomad_build)
+        hover_txt <- paste0("<b>SNP/Variant:</b> ", snp_id, "<br><b>CHR:</b> ", ifelse(is.null(chr_extracted), "N/A", chr_extracted), "<br><b>BP:</b> ", click_data$x, "<br><b>-log10(P):</b> ", round(click_data$y, 3), "<br><b>gnoMAD AF:</b> ", af_val)
         
-        hover_txt <- paste0(
-          "<b>SNP/Variant:</b> ", snp_id, "<br>",
-          "<b>CHR:</b> ", ifelse(is.null(chr_extracted), "N/A", chr_extracted), "<br>",
-          "<b>BP:</b> ", click_data$x, "<br>",
-          "<b>-log10(P):</b> ", round(click_data$y, 3), "<br>",
-          "<b>gnoMAD AF:</b> ", af_val
-        )
-        
-        annotation <- list(
-          x = click_data$x,
-          y = click_data$y,
-          text = hover_txt,
-          showarrow = FALSE,
-          xanchor = "left",
-          yanchor = "bottom",
-          bgcolor = "rgba(255, 255, 255, 0.95)",
-          bordercolor = "#444444",
-          borderpad = 6,
-          font = list(size = 12, color = "#000000")
-        )
+        annotation <- list(x = click_data$x, y = click_data$y, text = hover_txt, showarrow = FALSE, xanchor = "left", yanchor = "bottom", bgcolor = "rgba(255, 255, 255, 0.95)", bordercolor = "#444444", borderpad = 6, font = list(size = 12, color = "#000000"))
         clicked_point_overlay(annotation)
-        plotlyProxy("overlayPlot", session) %>%
-          plotlyProxyInvoke("relayout", list(annotations = list(annotation)))
+        plotlyProxy("overlayPlot", session) %>% plotlyProxyInvoke("relayout", list(annotations = list(annotation)))
       }
     }
   })
   
-  output$table1 <- renderDataTable({
-    req(inp1())
-    datatable(inp1())
-  })
+  # Tables full output
+  output$table1 <- renderDataTable({ req(inp1()); datatable(inp1()) })
+  output$table2 <- renderDataTable({ req(input$num_datasets >= 2, inp2()); datatable(inp2()) })
+  output$table3 <- renderDataTable({ req(input$num_datasets >= 3, inp3()); datatable(inp3()) })
+  output$table4 <- renderDataTable({ req(input$num_datasets >= 4, inp4()); datatable(inp4()) })
   
-  output$table2 <- renderDataTable({
-    req(inp2())
-    datatable(inp2())
-  })
   # --- REGION FILTERING REACTIVES ---
-  sys1_range <- reactive({
-    relayout <- event_data("plotly_relayout", source = if (identical(input$plot_mode, "overlay")) "overlayPlot" else "manhattanPlot1")
-    if (is.null(relayout)) return(NULL)
+  gen_region_reactives <- function(sys_id) {
+    r_source <- reactive({
+      relayout <- event_data("plotly_relayout", source = if (identical(input$plot_mode, "overlay")) "overlayPlot" else paste0("manhattanPlot", sys_id))
+      if (is.null(relayout)) return(NULL)
+      x0 <- relayout[["xaxis.range[0]"]]
+      x1 <- relayout[["xaxis.range[1]"]]
+      if (!is.null(x0) && !is.null(x1)) return(c(as.numeric(x0), as.numeric(x1)))
+      if (!is.null(relayout[["xaxis.range"]])) return(as.numeric(relayout[["xaxis.range"]]))
+      return(NULL)
+    })
     
-    x0 <- relayout[["xaxis.range[0]"]]
-    x1 <- relayout[["xaxis.range[1]"]]
-    if (!is.null(x0) && !is.null(x1)) return(c(as.numeric(x0), as.numeric(x1)))
-    if (!is.null(relayout[["xaxis.range"]])) return(as.numeric(relayout[["xaxis.range"]]))
-    return(NULL)
-  })
+    r_filtered <- reactive({
+      df <- get(paste0("inp", sys_id))()
+      req(df, input[[paste0("sys", sys_id, "_bp_col")]])
+      rng <- r_source()
+      if (!is.null(rng)) {
+        bp_col <- input[[paste0("sys", sys_id, "_bp_col")]]
+        df <- df[get(bp_col) >= rng[1] & get(bp_col) <= rng[2]]
+      }
+      df
+    })
+    return(r_filtered)
+  }
   
-  inp1_region <- reactive({
-    df <- inp1()
-    req(df, input$sys1_bp_col)
-    rng <- sys1_range()
-    if (!is.null(rng)) {
-      bp_col <- input$sys1_bp_col
-      df <- df[get(bp_col) >= rng[1] & get(bp_col) <= rng[2]]
-    }
-    df
-  })
+  inp1_region <- gen_region_reactives(1)
+  inp2_region <- gen_region_reactives(2)
+  inp3_region <- gen_region_reactives(3)
+  inp4_region <- gen_region_reactives(4)
   
-  sys2_range <- reactive({
-    relayout <- event_data("plotly_relayout", source = if (identical(input$plot_mode, "overlay")) "overlayPlot" else "manhattanPlot2")
-    if (is.null(relayout)) return(NULL)
-    
-    x0 <- relayout[["xaxis.range[0]"]]
-    x1 <- relayout[["xaxis.range[1]"]]
-    if (!is.null(x0) && !is.null(x1)) return(c(as.numeric(x0), as.numeric(x1)))
-    if (!is.null(relayout[["xaxis.range"]])) return(as.numeric(relayout[["xaxis.range"]]))
-    return(NULL)
-  })
-  
-  inp2_region <- reactive({
-    df <- inp2()
-    req(df, input$sys2_bp_col)
-    rng <- sys2_range()
-    if (!is.null(rng)) {
-      bp_col <- input$sys2_bp_col
-      df <- df[get(bp_col) >= rng[1] & get(bp_col) <= rng[2]]
-    }
-    df
-  })
-  
-  # --- NAVIGATION BUTTON ---
   observeEvent(input$go_to_nav3, {
     updateNavbarPage(session, "navbar", selected = "Navbar 3")
   })
   
-  # --- NAVBAR 2 PREVIEW TABLES (< 50 POINTS CHECK) ---
-  output$sys1_preview_ui <- renderUI({
-    df <- inp1_region()
-    if (is.null(df)) return(p("No dataset loaded."))
-    if (nrow(df) >= 50) {
-      p(sprintf("Region contains %d points. Zoom in until there are fewer than 50 points to show preview.", nrow(df)))
-    } else {
-      DTOutput("sys1_preview_table")
-    }
-  })
-  
-  output$sys1_preview_table <- renderDT({
-    req(inp1_region())
-    datatable(inp1_region(), options = list(pageLength = 5, scrollX = TRUE))
-  })
-  
-  output$sys2_preview_ui <- renderUI({
-    df <- inp2_region()
-    if (is.null(df)) return(p("No dataset loaded."))
-    if (nrow(df) >= 50) {
-      p(sprintf("Region contains %d points. Zoom in until there are fewer than 50 points to show preview.", nrow(df)))
-    } else {
-      DTOutput("sys2_preview_table")
-    }
-  })
-  
-  output$sys2_preview_table <- renderDT({
-    req(inp2_region())
-    datatable(inp2_region(), options = list(pageLength = 5, scrollX = TRUE))
-  })
-  
-  # --- NAVBAR 3 FILTERED TABLES & DOWNLOAD ---
-  output$filtered_table1 <- renderDataTable({
-    req(inp1_region())
-    datatable(inp1_region(), options = list(scrollX = TRUE))
-  })
-  
-  output$filtered_table2 <- renderDataTable({
-    req(inp2_region())
-    datatable(inp2_region(), options = list(scrollX = TRUE))
+  # Preview tables UI & rendering
+  lapply(1:4, function(i) {
+    output[[paste0("sys", i, "_preview_ui")]] <- renderUI({
+      if (input$num_datasets < i) return(NULL)
+      df <- get(paste0("inp", i, "_region"))()
+      if (is.null(df)) return(p("No dataset loaded."))
+      if (nrow(df) >= 50) {
+        p(sprintf("Region contains %d points. Zoom in (< 50 pts) for preview.", nrow(df)))
+      } else {
+        DTOutput(paste0("sys", i, "_preview_table"))
+      }
+    })
+    
+    output[[paste0("sys", i, "_preview_table")]] <- renderDT({
+      req(input$num_datasets >= i, get(paste0("inp", i, "_region"))())
+      datatable(get(paste0("inp", i, "_region"))(), options = list(pageLength = 5, scrollX = TRUE))
+    })
+    
+    output[[paste0("filtered_table", i)]] <- renderDataTable({
+      req(input$num_datasets >= i, get(paste0("inp", i, "_region"))())
+      datatable(get(paste0("inp", i, "_region"))(), options = list(scrollX = TRUE))
+    })
   })
   
   output$download_tables <- downloadHandler(
-    filename = function() {
-      paste0("region_filtered_tables_", Sys.Date(), ".zip")
-    },
+    filename = function() { paste0("region_filtered_tables_", Sys.Date(), ".zip") },
     content = function(file) {
       tmpdir <- tempdir()
-      f1 <- file.path(tmpdir, "sys1_region_filtered.csv")
-      f2 <- file.path(tmpdir, "sys2_region_filtered.csv")
-      
-      write.csv(inp1_region(), f1, row.names = FALSE)
-      write.csv(inp2_region(), f2, row.names = FALSE)
-      
-      zip(file, files = c(f1, f2), flags = "-j")
+      file_paths <- c()
+      n <- input$num_datasets
+      for (i in seq_len(n)) {
+        df_reg <- get(paste0("inp", i, "_region"))()
+        if (!is.null(df_reg)) {
+          f_path <- file.path(tmpdir, sprintf("sys%d_region_filtered.csv", i))
+          write.csv(df_reg, f_path, row.names = FALSE)
+          file_paths <- c(file_paths, f_path)
+        }
+      }
+      if (length(file_paths) > 0) {
+        zip(file, files = file_paths, flags = "-j")
+      }
     }
   )
 }
