@@ -372,15 +372,25 @@ ui <- fluidPage(
              fluidRow(
                column(12,
                       wellPanel(
-                        radioButtons("plot_mode", "Plot Display Mode:",
-                                     choices = c("Individual Plots" = "individual", "Overlay Both Datasets" = "overlay"),
-                                     selected = "individual", inline = TRUE),
-                        
-                        conditionalPanel(
-                          condition = "input.plot_mode == 'individual'",
-                          radioButtons("individual_layout", "Individual Plot Layout:",
-                                       choices = c("Side-by-Side" = "side", "Top-to-Bottom" = "stacked"),
-                                       selected = "side", inline = TRUE)
+                        fluidRow(
+                          column(8,
+                                 radioButtons("plot_mode", "Plot Display Mode:",
+                                              choices = c("Individual Plots" = "individual", "Overlay Both Datasets" = "overlay"),
+                                              selected = "individual", inline = TRUE),
+                                 
+                                 conditionalPanel(
+                                   condition = "input.plot_mode == 'individual'",
+                                   radioButtons("individual_layout", "Individual Plot Layout:",
+                                                choices = c("Side-by-Side" = "side", "Top-to-Bottom" = "stacked"),
+                                                selected = "side", inline = TRUE)
+                                 )
+                          ),
+                          column(4, class = "text-right",
+                                 actionButton("reset_plots", "Reset Plot View & Axes", 
+                                              icon = icon("rotate-left"), 
+                                              class = "btn-warning", 
+                                              style = "margin-top: 15px;")
+                          )
                         )
                       )
                )
@@ -449,6 +459,24 @@ ui <- fluidPage(
 
 # Server Logic
 server <- function(input, output, session) {
+  # Reactive counter to force plot axis resets
+  reset_counter <- reactiveVal(0)
+  
+  # Reset Button Handler
+  observeEvent(input$reset_plots, {
+    # 1. Clear clicked annotations
+    clicked_point_sys1(NULL)
+    clicked_point_sys2(NULL)
+    clicked_point_overlay(NULL)
+    
+    # 2. Increment counter (forces Plotly to auto-scale axes)
+    reset_counter(reset_counter() + 1)
+    
+    # 3. Clear annotations via proxy
+    plotlyProxy("manhattanPlot1", session) %>% plotlyProxyInvoke("relayout", list(annotations = list()))
+    plotlyProxy("manhattanPlot2", session) %>% plotlyProxyInvoke("relayout", list(annotations = list()))
+    plotlyProxy("overlayPlot", session) %>% plotlyProxyInvoke("relayout", list(annotations = list()))
+  })
   # Store the last relayout state to prevent infinite zooming loops
   last_relayout <- reactiveVal(NULL)
   
@@ -627,7 +655,7 @@ server <- function(input, output, session) {
       col = c(input$sys1_col, input$sys1_col)
     )
     p1$x$source <- "manhattanPlot1"
-    layout(p1, uirevision = "manhattanPlot1_state")
+    layout(p1, uirevision = reset_counter())
   })
   
   output$manhattanPlot2 <- renderPlotly({
@@ -644,7 +672,7 @@ server <- function(input, output, session) {
       col = c(input$sys2_col, input$sys2_col)
     )
     p2$x$source <- "manhattanPlot2"
-    layout(p2, uirevision = "manhattanPlot2_state")
+    layout(p2, uirevision = reset_counter())
   })
   
   output$overlayPlot <- renderPlotly({     req(inp1(), inp2(), input$sys1_chr_col, input$sys1_bp_col, input$sys1_p_col)
@@ -698,7 +726,7 @@ server <- function(input, output, session) {
         xaxis = list(title = "Base Pair Position (BP)"),
         yaxis = list(title = "-log10(p-value)"),
         legend = list(title = list(text = '<b>Dataset</b>')),
-        uirevision = "overlayPlot_state"
+        uirevision = reset_counter()
       )
     
     p_overlay$x$source <- "overlayPlot"
@@ -722,14 +750,32 @@ server <- function(input, output, session) {
     )
   })
   
-  # Synchronize Zoom/Pan across individual plots safely
+  # Helper to extract numeric X-axis range from relayout events
+  extract_x_range <- function(relayout_data) {
+    if (is.null(relayout_data)) return(NULL)
+    x0 <- relayout_data[["xaxis.range[0]"]]
+    x1 <- relayout_data[["xaxis.range[1]"]]
+    if (!is.null(x0) && !is.null(x1)) return(c(as.numeric(x0), as.numeric(x1)))
+    if (!is.null(relayout_data[["xaxis.range"]])) return(as.numeric(relayout_data[["xaxis.range"]]))
+    return(NULL)
+  }
+  
+  last_synced_range <- reactiveVal(NULL)
+  
+  # Synchronize Zoom/Pan with Echo Suppression
   observeEvent(event_data("plotly_relayout", source = "manhattanPlot1"), {
     relayout_data <- event_data("plotly_relayout", source = "manhattanPlot1")
     req(relayout_data)
     
-    # Break the feedback loop
-    if (identical(relayout_data, last_relayout())) return()
-    last_relayout(relayout_data)
+    rng <- extract_x_range(relayout_data)
+    last_rng <- last_synced_range()
+    
+    # Ignore echo if the numerical range is already identical
+    if (!is.null(rng) && !is.null(last_rng)) {
+      if (isTRUE(all.equal(rng, last_rng, tolerance = 1e-4))) return()
+    }
+    
+    if (!is.null(rng)) last_synced_range(rng)
     
     plotlyProxy("manhattanPlot2", session) %>%
       plotlyProxyInvoke("relayout", relayout_data)
@@ -739,9 +785,15 @@ server <- function(input, output, session) {
     relayout_data <- event_data("plotly_relayout", source = "manhattanPlot2")
     req(relayout_data)
     
-    # Break the feedback loop
-    if (identical(relayout_data, last_relayout())) return()
-    last_relayout(relayout_data)
+    rng <- extract_x_range(relayout_data)
+    last_rng <- last_synced_range()
+    
+    # Ignore echo if the numerical range is already identical
+    if (!is.null(rng) && !is.null(last_rng)) {
+      if (isTRUE(all.equal(rng, last_rng, tolerance = 1e-4))) return()
+    }
+    
+    if (!is.null(rng)) last_synced_range(rng)
     
     plotlyProxy("manhattanPlot1", session) %>%
       plotlyProxyInvoke("relayout", relayout_data)
