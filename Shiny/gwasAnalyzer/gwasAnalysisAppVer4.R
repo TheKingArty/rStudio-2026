@@ -1,13 +1,13 @@
 # Load R packages
-library(shiny) # shiny
-library(shinythemes) # themes
-library(DT) # datatables
+library(shiny)
+library(shinythemes)
+library(DT)
 library(manhattanly)
 library(data.table)
 library(plotly)
-library(colourpicker) # color input
-library(httr2) # API requests
-library(jsonlite) # JSON parsing
+library(colourpicker)
+library(httr2)
+library(jsonlite)
 
 # Set max upload size to 1GB
 options(shiny.maxRequestSize = 1000 * 1024^2)
@@ -69,40 +69,97 @@ build_gnomad_url <- function(query, dataset) {
     return(paste0("https://gnomad.broadinstitute.org/region/", formatted_reg, "?dataset=", dataset))
   }
   
-  # 4. Universal Search Endpoint (Gene Symbols like PCSK9, rsIDs like rs1234)
+  # 4. Universal Search Endpoint
   return(paste0("https://gnomad.broadinstitute.org/search?dataset=", dataset, "&q=", URLencode(q, reserved = TRUE)))
+}
+
+# Helper to extract raw Variant ID from hover text/customdata
+clean_variant_id <- function(raw_input) {
+  if (is.null(raw_input) || length(raw_input) == 0) return(NULL)
+  raw_str <- as.character(raw_input[1])
+  
+  if (grepl("SNP:", raw_str)) {
+    match <- regmatches(raw_str, regexec("SNP:\\s*([^<\\s]+)", raw_str))[[1]]
+    if (length(match) >= 2) return(trimws(match[2]))
+  }
+  
+  var_match <- regmatches(raw_str, regexec("([0-9]{1,2}|X|Y|MT|M)[-:_]([0-9]+)[-:_]([A-Za-z]+)[-:_]([A-Za-z]+)", raw_str, ignore.case = TRUE))[[1]]
+  if (length(var_match) >= 1) return(var_match[1])
+  
+  return(trimws(raw_str))
 }
 
 # Helper to fetch Live Allele Frequency from gnoMAD GraphQL API
 fetch_gnomad_af <- function(variant_id, dataset = "gnomad_r4") {
-  if (is.null(variant_id) || !nzchar(variant_id)) return("N/A")
+  cleaned_id <- clean_variant_id(variant_id)
+  if (is.null(cleaned_id) || !nzchar(cleaned_id)) return("N/A")
   
-  # Clean and convert ID from 1:730869:C:T to 1-730869-C-T
-  clean_id <- gsub("^chr", "", variant_id, ignore.case = TRUE)
-  formatted_id <- gsub("[:_]", "-", clean_id)
+  no_chr_id <- gsub("^chr", "", cleaned_id, ignore.case = TRUE)
+  formatted_id <- gsub("[:_]", "-", no_chr_id)
   
-  # Construct GraphQL Query
-  query_string <- sprintf('{
-    variant(variant_id: "%s", dataset: %s) {
-      genome { af }
-      exome { af }
-    }
-  }', formatted_id, dataset)
+  is_canonical_var <- grepl("^([0-9]{1,2}|X|Y|MT|M)-[0-9]+-[A-Za-z]+-[A-Za-z]+$", formatted_id, ignore.case = TRUE)
+  is_rsid <- grepl("^rs[0-9]+$", formatted_id, ignore.case = TRUE)
+  
+  # Construct GraphQL query based on variant format type
+  if (is_rsid) {
+    query_string <- sprintf('{
+      rsid(rsid: "%s") {
+        variants(dataset: %s) {
+          variant_id
+          genome { af }
+          exome { af }
+          joint { af }
+        }
+      }
+    }', formatted_id, dataset)
+  } else if (is_canonical_var) {
+    query_string <- sprintf('{
+      variant(variant_id: "%s", dataset: %s) {
+        genome { af }
+        exome { af }
+        joint { af }
+      }
+    }', formatted_id, dataset)
+  } else {
+    message("gnoMAD Fetch Skipped: ID '", formatted_id, "' is not in CHROM-POS-REF-ALT or rsID format.")
+    return("No REF/ALT Alleles")
+  }
   
   tryCatch({
     resp <- request("https://gnomad.broadinstitute.org/api") %>%
+      req_headers("Content-Type" = "application/json") %>%
       req_body_json(list(query = query_string)) %>%
-      req_timeout(3) %>%
+      req_timeout(10) %>%
+      req_error(is_error = function(resp) FALSE) %>%
       req_perform()
     
+    if (resp_status(resp) >= 400) {
+      message("gnoMAD API HTTP Error Code: ", resp_status(resp))
+      return("API Error")
+    }
+    
     res_data <- resp_body_json(resp)
-    var_res <- res_data$data$variant
+    
+    if (!is.null(res_data$errors)) {
+      message("gnoMAD GraphQL returned error: ", jsonlite::toJSON(res_data$errors))
+      return("Not Found")
+    }
+    
+    # Extract variant object
+    if (is_rsid) {
+      var_list <- res_data$data$rsid$variants
+      if (is.null(var_list) || length(var_list) == 0) return("Not Found")
+      var_res <- var_list[[1]]
+    } else {
+      var_res <- res_data$data$variant
+    }
     
     if (is.null(var_res)) return("Not Found")
     
-    # Check genome AF first, then exome AF
     af_val <- NULL
-    if (!is.null(var_res$genome) && !is.null(var_res$genome$af)) {
+    if (!is.null(var_res$joint) && !is.null(var_res$joint$af)) {
+      af_val <- var_res$joint$af
+    } else if (!is.null(var_res$genome) && !is.null(var_res$genome$af)) {
       af_val <- var_res$genome$af
     } else if (!is.null(var_res$exome) && !is.null(var_res$exome$af)) {
       af_val <- var_res$exome$af
@@ -112,6 +169,7 @@ fetch_gnomad_af <- function(variant_id, dataset = "gnomad_r4") {
     return(formatC(as.numeric(af_val), format = "e", digits = 3))
     
   }, error = function(e) {
+    message("gnoMAD Fetch Exception: ", e$message)
     return("Error Fetching")
   })
 }
@@ -147,7 +205,6 @@ ui <- fluidPage(
              
              hr(),
              
-             # Row 2: Dynamic Column Mapping & Filters
              fluidRow(
                # System 1 Controls
                column(6,
@@ -213,12 +270,10 @@ ui <- fluidPage(
                )
              ),
              
-             # Dynamic container handles both side-by-side, stacked, and overlay modes
              uiOutput("plot_container"),
              
              hr(),
              
-             # gnomAD Link Panel inside UI
              fluidRow(
                column(12,
                       wellPanel(
@@ -328,7 +383,6 @@ server <- function(input, output, session) {
     df
   })
   
-  # Dynamic UI Layout for Plot Mode
   output$plot_container <- renderUI({
     if (input$plot_mode == "individual") {
       if (input$individual_layout == "side") {
@@ -350,7 +404,6 @@ server <- function(input, output, session) {
     }
   })
   
-  # --- SYSTEM 1 INDIVIDUAL PLOT ---
   output$manhattanPlot1 <- renderPlotly({
     req(inp1(), input$sys1_chr_col, input$sys1_bp_col, input$sys1_p_col, input$sys1_snp_col)
     
@@ -368,7 +421,6 @@ server <- function(input, output, session) {
     layout(p1, uirevision = "manhattanPlot1_state")
   })
   
-  # --- SYSTEM 2 INDIVIDUAL PLOT ---
   output$manhattanPlot2 <- renderPlotly({
     req(inp2(), input$sys2_chr_col, input$sys2_bp_col, input$sys2_p_col, input$sys2_snp_col)
     
@@ -386,7 +438,6 @@ server <- function(input, output, session) {
     layout(p2, uirevision = "manhattanPlot2_state")
   })
   
-  # --- OVERLAY PLOT LOGIC ---
   output$overlayPlot <- renderPlotly({
     req(inp1(), inp2(), input$sys1_chr_col, input$sys1_bp_col, input$sys1_p_col, input$sys1_snp_col)
     req(input$sys2_chr_col, input$sys2_bp_col, input$sys2_p_col, input$sys2_snp_col)
@@ -444,7 +495,6 @@ server <- function(input, output, session) {
     p_overlay
   })
   
-  # --- GNOMAD LINK GENERATOR LOGIC ---
   output$gnomad_link_button <- renderUI({
     req(input$gnomad_query)
     query_trimmed <- trimws(input$gnomad_query)
@@ -462,7 +512,6 @@ server <- function(input, output, session) {
     )
   })
   
-  # --- SYNC ZOOM/PAN BETWEEN PLOTS ---
   observeEvent(event_data("plotly_relayout", source = "manhattanPlot1"), {
     relayout_data <- event_data("plotly_relayout", source = "manhattanPlot1")
     if (!is.null(relayout_data)) {
@@ -479,9 +528,7 @@ server <- function(input, output, session) {
     }
   }, ignoreInit = TRUE)
   
-  # --- DYNAMIC CLICK OBSERVERS WITH OPTION 2 gnoMAD API FETCH ---
-  
-  # System 1 Click Observer
+  # Click Observers
   observeEvent(event_data("plotly_click", source = "manhattanPlot1"), {
     click_data <- event_data("plotly_click", source = "manhattanPlot1")
     if (!is.null(click_data)) {
@@ -492,11 +539,10 @@ server <- function(input, output, session) {
         plotlyProxy("manhattanPlot1", session) %>%
           plotlyProxyInvoke("relayout", list(annotations = list()))
       } else {
-        # Extract SNP ID / Variant ID
-        snp_id <- if (!is.null(click_data$customdata)) click_data$customdata else click_data$text
+        raw_val <- if (!is.null(click_data$customdata)) click_data$customdata else click_data$text
+        snp_id <- clean_variant_id(raw_val)
         if (is.null(snp_id) || !nzchar(snp_id)) snp_id <- paste0(click_data$x)
         
-        # Live fetch gnoMAD Allele Frequency
         af_val <- fetch_gnomad_af(snp_id, input$gnomad_build)
         
         hover_txt <- paste0(
@@ -526,7 +572,6 @@ server <- function(input, output, session) {
     }
   })
   
-  # System 2 Click Observer
   observeEvent(event_data("plotly_click", source = "manhattanPlot2"), {
     click_data <- event_data("plotly_click", source = "manhattanPlot2")
     if (!is.null(click_data)) {
@@ -537,7 +582,8 @@ server <- function(input, output, session) {
         plotlyProxy("manhattanPlot2", session) %>%
           plotlyProxyInvoke("relayout", list(annotations = list()))
       } else {
-        snp_id <- if (!is.null(click_data$customdata)) click_data$customdata else click_data$text
+        raw_val <- if (!is.null(click_data$customdata)) click_data$customdata else click_data$text
+        snp_id <- clean_variant_id(raw_val)
         if (is.null(snp_id) || !nzchar(snp_id)) snp_id <- paste0(click_data$x)
         
         af_val <- fetch_gnomad_af(snp_id, input$gnomad_build)
@@ -569,7 +615,6 @@ server <- function(input, output, session) {
     }
   })
   
-  # Overlay Plot Click Observer
   observeEvent(event_data("plotly_click", source = "overlayPlot"), {
     click_data <- event_data("plotly_click", source = "overlayPlot")
     if (!is.null(click_data)) {
@@ -580,7 +625,8 @@ server <- function(input, output, session) {
         plotlyProxy("overlayPlot", session) %>%
           plotlyProxyInvoke("relayout", list(annotations = list()))
       } else {
-        snp_id <- if (!is.null(click_data$customdata)) click_data$customdata else click_data$text
+        raw_val <- if (!is.null(click_data$customdata)) click_data$customdata else click_data$text
+        snp_id <- clean_variant_id(raw_val)
         if (is.null(snp_id) || !nzchar(snp_id)) snp_id <- paste0(click_data$x)
         
         af_val <- fetch_gnomad_af(snp_id, input$gnomad_build)
@@ -623,5 +669,4 @@ server <- function(input, output, session) {
   })
 }
 
-# Create Shiny object
 shinyApp(ui = ui, server = server)
