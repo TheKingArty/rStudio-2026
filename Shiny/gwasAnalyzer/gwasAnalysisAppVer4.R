@@ -449,7 +449,8 @@ ui <- fluidPage(
 
 # Server Logic
 server <- function(input, output, session) {
-  
+  # Store the last relayout state to prevent infinite zooming loops
+  last_relayout <- reactiveVal(NULL)
   
   output$txtout <- renderText({
     paste(input$txt1, input$txt2, sep = " ")
@@ -673,6 +674,7 @@ server <- function(input, output, session) {
         type = 'scatter',
         mode = 'markers',
         name = 'System 1',
+        key = ~SNP_plot,         # <--- ADD THIS
         marker = list(color = input$sys1_col, size = 6, opacity = 0.7),
         customdata = ~SNP_plot,
         text = ~paste("SNP:", SNP_plot, "<br>CHR:", CHR_plot, "<br>BP:", BP_plot, "<br>-log10(P):", round(P_plot, 3)),
@@ -685,6 +687,7 @@ server <- function(input, output, session) {
         type = 'scatter',
         mode = 'markers',
         name = 'System 2',
+        key = ~SNP_plot,         # <--- ADD THIS
         marker = list(color = input$sys2_col, size = 6, opacity = 0.7),
         customdata = ~SNP_plot,
         text = ~paste("SNP:", SNP_plot, "<br>CHR:", CHR_plot, "<br>BP:", BP_plot, "<br>-log10(P):", round(P_plot, 3)),
@@ -719,21 +722,29 @@ server <- function(input, output, session) {
     )
   })
   
-  # Synchronize Zoom/Pan across individual plots
+  # Synchronize Zoom/Pan across individual plots safely
   observeEvent(event_data("plotly_relayout", source = "manhattanPlot1"), {
     relayout_data <- event_data("plotly_relayout", source = "manhattanPlot1")
-    if (!is.null(relayout_data)) {
-      plotlyProxy("manhattanPlot2", session) %>%
-        plotlyProxyInvoke("relayout", relayout_data)
-    }
+    req(relayout_data)
+    
+    # Break the feedback loop
+    if (identical(relayout_data, last_relayout())) return()
+    last_relayout(relayout_data)
+    
+    plotlyProxy("manhattanPlot2", session) %>%
+      plotlyProxyInvoke("relayout", relayout_data)
   }, ignoreInit = TRUE)
   
   observeEvent(event_data("plotly_relayout", source = "manhattanPlot2"), {
     relayout_data <- event_data("plotly_relayout", source = "manhattanPlot2")
-    if (!is.null(relayout_data)) {
-      plotlyProxy("manhattanPlot1", session) %>%
-        plotlyProxyInvoke("relayout", relayout_data)
-    }
+    req(relayout_data)
+    
+    # Break the feedback loop
+    if (identical(relayout_data, last_relayout())) return()
+    last_relayout(relayout_data)
+    
+    plotlyProxy("manhattanPlot1", session) %>%
+      plotlyProxyInvoke("relayout", relayout_data)
   }, ignoreInit = TRUE)
   
   # Click Observers
@@ -747,7 +758,9 @@ server <- function(input, output, session) {
         plotlyProxy("manhattanPlot1", session) %>%
           plotlyProxyInvoke("relayout", list(annotations = list()))
       } else {
-        raw_val <- if (!is.null(click_data$customdata)) click_data$customdata else click_data$text
+        raw_val <- click_data$key
+        if (is.null(raw_val)) raw_val <- click_data$customdata
+        if (is.null(raw_val)) raw_val <- click_data$text
         chr_fb  <- parse_chr_input(input$sys1_chr_filter)[1]
         bp_fb   <- click_data$x
         
@@ -794,7 +807,9 @@ server <- function(input, output, session) {
         plotlyProxy("manhattanPlot2", session) %>%
           plotlyProxyInvoke("relayout", list(annotations = list()))
       } else {
-        raw_val <- if (!is.null(click_data$customdata)) click_data$customdata else click_data$text
+        raw_val <- click_data$key
+        if (is.null(raw_val)) raw_val <- click_data$customdata
+        if (is.null(raw_val)) raw_val <- click_data$text
         chr_fb  <- parse_chr_input(input$sys2_chr_filter)[1]
         bp_fb   <- click_data$x
         
@@ -841,7 +856,9 @@ server <- function(input, output, session) {
         plotlyProxy("overlayPlot", session) %>%
           plotlyProxyInvoke("relayout", list(annotations = list()))
       } else {
-        raw_val <- if (!is.null(click_data$customdata)) click_data$customdata else click_data$text
+        raw_val <- click_data$key
+        if (is.null(raw_val)) raw_val <- click_data$customdata
+        if (is.null(raw_val)) raw_val <- click_data$text
         chr_fb  <- parse_chr_input(input$sys1_chr_filter)[1]
         bp_fb   <- click_data$x
         
